@@ -770,34 +770,34 @@ consultas:
   diag_receber_amostra:
     admin: true
     descricao: >
-      Até 5 títulos recentes de cada STATUS, com cliente e valor, para conferir na tela do ERP
-      o que cada status significa.
+      Até 5 títulos do último ano de cada STATUS, com cliente e valor, para conferir na tela do
+      ERP o que cada status significa.
     params: []
     sql: |
       SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
                r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
              FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
-             WHERE r.STATUS = '0' ORDER BY r.DATAEMISSAO DESC) a
+             WHERE r.STATUS = '0' AND r.DATAEMISSAO >= CURRENT_DATE - 365 ORDER BY r.DATAEMISSAO DESC) a
       UNION ALL
       SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
                r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
              FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
-             WHERE r.STATUS = '1' ORDER BY r.DATAEMISSAO DESC) b
+             WHERE r.STATUS = '1' AND r.DATAEMISSAO >= CURRENT_DATE - 365 ORDER BY r.DATAEMISSAO DESC) b
       UNION ALL
       SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
                r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
              FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
-             WHERE r.STATUS = '2' ORDER BY r.DATAEMISSAO DESC) c2
+             WHERE r.STATUS = '2' AND r.DATAEMISSAO >= CURRENT_DATE - 365 ORDER BY r.DATAEMISSAO DESC) c2
       UNION ALL
       SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
                r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
              FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
-             WHERE r.STATUS = '6' ORDER BY r.DATAEMISSAO DESC) d
+             WHERE r.STATUS = '6' AND r.DATAEMISSAO >= CURRENT_DATE - 365 ORDER BY r.DATAEMISSAO DESC) d
       UNION ALL
       SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
                r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
              FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
-             WHERE r.STATUS = 'A' ORDER BY r.DATAEMISSAO DESC) e
+             WHERE r.STATUS = 'A' AND r.DATAEMISSAO >= CURRENT_DATE - 365 ORDER BY r.DATAEMISSAO DESC) e
 
   diag_flags:
     admin: true

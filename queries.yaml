@@ -26,6 +26,15 @@
 #   - CPF gravado só com dígitos; descrições em maiúsculas e sem acento;
 #   - lojas: 01 Bom Jardim/RJ (principal), 02 São José do Calçado/ES; CD, EC, EN são internas.
 #
+# Views do fornecedor do ERP (FDC Campos), que mostram a regra oficial (diag_views):
+#   - VIEWESTOQUE: o saldo é ESTOQUE.QTDER (a coluna ESTOQUE.ESTOQUE não é usada);
+#   - VIEWPRODUTOS: ATIVO = 'T', preço de venda = PRECOAVISTA, marca = FABRICANTE.NOMEFABRICANTE
+#     (PRODUTOMARCA está vazia);
+#   - VIEWFATURAMENTO: venda válida = SAIDA.STATUS 'A' e TIPOSAIDA '1', '2' ou '9'; item com
+#     IDPRODUTOREFERENCIA é garantia estendida, não produto.
+#
+# Fotos: PRODUTOFOTO.FOTO (binário). URL pública: https://sonhoreal-erp.scaleia.ai/foto/{codigo}/{seq}.jpg
+#
 # Este arquivo é recarregado sozinho quando muda (sem reiniciar a API).
 # Se o arquivo novo tiver erro, a API continua com o anterior e o /health mostra o erro.
 # Depois de mexer, rode "ponte-api.exe -testar" na máquina do cliente.
@@ -37,9 +46,10 @@ consultas:
   buscar_produto:
     descricao: >
       "Quanto custa X?" / "Vocês têm X?". Procura produtos ativos e com preço pelo nome (termos
-      em qualquer ordem, procurando também no grupo), pelo código interno, pelo EAN ou pela
-      referência de fábrica. Devolve preço à vista, a prazo, o promocional (se houver promoção
-      vigente), o estoque na loja e o estoque somado de todas as lojas e do depósito.
+      em qualquer ordem, procurando também na marca/fabricante e no grupo), pelo código interno,
+      pelo EAN ou pela referência de fábrica. Devolve preço à vista, a prazo, o promocional (se
+      houver promoção vigente), o estoque na loja, o estoque somado de todas as lojas e do
+      depósito, e o link da foto principal (foto_url, null se não houver).
       Mande termos curtos e no singular: "colchao casal", "guarda roupa 6 portas", "moto g06".
       estoque_loja > 0 = pronta entrega na loja; só estoque_total > 0 = tem no depósito/outra loja.
     max_linhas: 15
@@ -58,7 +68,7 @@ consultas:
       SELECT
         p.IDPRODUTO        AS codigo,
         p.DESCRICAOPRODUTO AS descricao,
-        m.NOMEMARCA        AS marca,
+        COALESCE(m.NOMEMARCA, fa.NOMEFABRICANTE) AS marca,
         g.NOMEGRUPO        AS grupo,
         p.UNIDADEMEDIDA    AS unidade,
         p.PRECOAVISTA      AS preco_avista,
@@ -75,29 +85,36 @@ consultas:
                THEN p.PRECOPROMOCAO END
         )                  AS preco_promocional,
         t.estoque_loja,
-        t.estoque_total
+        t.estoque_total,
+        (SELECT FIRST 1 'https://sonhoreal-erp.scaleia.ai/foto/' || CAST(pf.IDPRODUTO AS VARCHAR(10))
+                        || '/' || CAST(pf.SEQ AS VARCHAR(10)) || '.jpg'
+           FROM PRODUTOFOTO pf
+          WHERE pf.IDPRODUTO = p.IDPRODUTO AND pf.FOTO IS NOT NULL
+          ORDER BY pf.SEQ) AS foto_url
       FROM (
         -- Escolhe os 15 primeiros só com o necessário para filtrar e ordenar;
         -- preço promocional, marca e grupo são buscados depois, só para esses 15.
         SELECT FIRST 15
           b.id,
-          CASE WHEN e.ESTOQUE > 0 THEN 0 ELSE 1 END AS sem_estoque_loja,
-          CASE WHEN e.ESTOQUE > 0 THEN e.ESTOQUE ELSE 0 END AS estoque_loja,
-          (SELECT COALESCE(SUM(e2.ESTOQUE), 0) FROM ESTOQUE e2
-            WHERE e2.IDPRODUTO = b.id AND e2.ESTOQUE > 0) AS estoque_total,
+          CASE WHEN e.QTDER > 0 THEN 0 ELSE 1 END AS sem_estoque_loja,
+          CASE WHEN e.QTDER > 0 THEN e.QTDER ELSE 0 END AS estoque_loja,
+          (SELECT COALESCE(SUM(e2.QTDER), 0) FROM ESTOQUE e2
+            WHERE e2.IDPRODUTO = b.id AND e2.QTDER > 0) AS estoque_total,
           CASE WHEN b.descricao CONTAINING :busca_1 THEN 0 ELSE 1 END AS so_no_grupo,
           b.descricao
         FROM (
-          -- "texto": descrição + marca + grupo em maiúsculas e sem acento.
+          -- "texto": descrição + marca + fabricante + grupo em maiúsculas e sem acento.
           SELECT
             p0.IDPRODUTO AS id, p0.DESCRICAOPRODUTO AS descricao,
             p0.EAN AS ean, p0.REFERENCIAFABRICA AS referencia,
             REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-              UPPER(p0.DESCRICAOPRODUTO || ' ' || COALESCE(m0.NOMEMARCA, '') || ' ' || COALESCE(g0.NOMEGRUPO, '')),
+              UPPER(p0.DESCRICAOPRODUTO || ' ' || COALESCE(m0.NOMEMARCA, '') || ' ' || COALESCE(fa0.NOMEFABRICANTE, '')
+                    || ' ' || COALESCE(g0.NOMEGRUPO, '')),
               'Á', 'A'), 'À', 'A'), 'Â', 'A'), 'Ã', 'A'), 'É', 'E'), 'Ê', 'E'), 'Í', 'I'),
               'Ó', 'O'), 'Ô', 'O'), 'Õ', 'O'), 'Ú', 'U'), 'Ü', 'U'), 'Ç', 'C') AS texto
           FROM PRODUTO p0
           LEFT JOIN PRODUTOMARCA m0 ON m0.IDMARCA = p0.IDMARCA
+          LEFT JOIN FABRICANTE fa0  ON fa0.IDFABRICANTE = p0.IDFABRICANTE
           LEFT JOIN GRUPO g0        ON g0.IDGRUPO = p0.IDGRUPO
           WHERE COALESCE(p0.ATIVO, 'T') IN ('S', 'T')
             AND COALESCE(p0.FORADELINHA, 'F') NOT IN ('S', 'T')
@@ -115,6 +132,7 @@ consultas:
       ) t
       JOIN PRODUTO p           ON p.IDPRODUTO = t.id
       LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
+      LEFT JOIN FABRICANTE fa  ON fa.IDFABRICANTE = p.IDFABRICANTE
       LEFT JOIN GRUPO g        ON g.IDGRUPO = p.IDGRUPO
       ORDER BY t.sem_estoque_loja, t.estoque_total DESC, t.so_no_grupo, t.descricao
 
@@ -122,7 +140,8 @@ consultas:
     descricao: >
       Ficha completa de UM produto (use o codigo que veio do buscar_produto): preços, promoção
       com validade, estoque, medidas, garantia, descrição do site, dados técnicos, se tem montagem
-      e frete grátis, e se aceita desconto. ativo = N: produto fora de linha, não ofereça.
+      e frete grátis, se aceita desconto, a foto principal (foto_url) e quantas fotos existem
+      (fotos; para todas, use fotos_produto). ativo = N: produto fora de linha, não ofereça.
     params:
       - nome: codigo
         tipo: inteiro
@@ -137,7 +156,7 @@ consultas:
         p.IDPRODUTO         AS codigo,
         p.DESCRICAOPRODUTO  AS descricao,
         CASE WHEN COALESCE(p.ATIVO, 'T') IN ('S', 'T') THEN 'S' ELSE 'N' END AS ativo,
-        m.NOMEMARCA         AS marca,
+        COALESCE(m.NOMEMARCA, fa.NOMEFABRICANTE) AS marca,
         g.NOMEGRUPO         AS grupo,
         sg.NOMESUBGRUPO     AS subgrupo,
         p.REFERENCIAFABRICA AS referencia,
@@ -153,9 +172,9 @@ consultas:
         COALESCE(CAST(pp.DATAFIM AS DATE),
           CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
                THEN CAST(p.DATAFIMPROMOCAO AS DATE) END) AS promocao_ate,
-        CASE WHEN e.ESTOQUE > 0 THEN e.ESTOQUE ELSE 0 END AS estoque_loja,
-        (SELECT COALESCE(SUM(e2.ESTOQUE), 0) FROM ESTOQUE e2
-          WHERE e2.IDPRODUTO = p.IDPRODUTO AND e2.ESTOQUE > 0) AS estoque_total,
+        CASE WHEN e.QTDER > 0 THEN e.QTDER ELSE 0 END AS estoque_loja,
+        (SELECT COALESCE(SUM(e2.QTDER), 0) FROM ESTOQUE e2
+          WHERE e2.IDPRODUTO = p.IDPRODUTO AND e2.QTDER > 0) AS estoque_total,
         p.ALTURA            AS altura,
         p.LARGURA           AS largura,
         p.COMPRIMENTO       AS comprimento,
@@ -167,9 +186,17 @@ consultas:
         CASE WHEN p.TEMMONTAGEM IN ('S', 'T') THEN 'S' ELSE 'N' END    AS tem_montagem,
         CASE WHEN w.MONTAGEMGRATIS IN ('S', 'T') THEN 'S' ELSE 'N' END AS montagem_gratis,
         CASE WHEN w.FRETEGRATIS IN ('S', 'T') THEN 'S' ELSE 'N' END    AS frete_gratis,
-        CASE WHEN p.NAOTEMDESCONTO IN ('S', 'T') THEN 'N' ELSE 'S' END AS aceita_desconto
+        CASE WHEN p.NAOTEMDESCONTO IN ('S', 'T') THEN 'N' ELSE 'S' END AS aceita_desconto,
+        (SELECT FIRST 1 'https://sonhoreal-erp.scaleia.ai/foto/' || CAST(pf.IDPRODUTO AS VARCHAR(10))
+                        || '/' || CAST(pf.SEQ AS VARCHAR(10)) || '.jpg'
+           FROM PRODUTOFOTO pf
+          WHERE pf.IDPRODUTO = p.IDPRODUTO AND pf.FOTO IS NOT NULL
+          ORDER BY pf.SEQ) AS foto_url,
+        (SELECT COUNT(*) FROM PRODUTOFOTO pf
+          WHERE pf.IDPRODUTO = p.IDPRODUTO AND pf.FOTO IS NOT NULL) AS fotos
       FROM PRODUTO p
       LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
+      LEFT JOIN FABRICANTE fa  ON fa.IDFABRICANTE = p.IDFABRICANTE
       LEFT JOIN GRUPO g        ON g.IDGRUPO = p.IDGRUPO
       LEFT JOIN SUBGRUPO sg    ON sg.IDSUBGRUPO = p.IDSUBGRUPO
       LEFT JOIN PRODUTOWEB w   ON w.IDPRODUTO = p.IDPRODUTO
@@ -178,6 +205,48 @@ consultas:
             AND CURRENT_DATE BETWEEN CAST(pp.DATAINI AS DATE) AND CAST(pp.DATAFIM AS DATE)
             AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
       WHERE p.IDPRODUTO = :codigo
+
+  fotos_produto:
+    descricao: >
+      "Tem mais fotos?" Links de todas as fotos de UM produto, na ordem do cadastro. Cada url
+      abre a imagem direto (JPEG/PNG), pronta para enviar no WhatsApp.
+    max_linhas: 20
+    params:
+      - nome: codigo
+        tipo: inteiro
+        obrigatorio: true
+        exemplo: "1"
+    sql: |
+      SELECT
+        pf.SEQ AS seq,
+        'https://sonhoreal-erp.scaleia.ai/foto/' || CAST(pf.IDPRODUTO AS VARCHAR(10))
+          || '/' || CAST(pf.SEQ AS VARCHAR(10)) || '.jpg' AS url
+      FROM PRODUTOFOTO pf
+      JOIN PRODUTO p ON p.IDPRODUTO = pf.IDPRODUTO
+      WHERE pf.IDPRODUTO = :codigo AND pf.FOTO IS NOT NULL
+        AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
+      ORDER BY pf.SEQ
+
+  # Servida pela rota pública /foto/{codigo}/{seq}.jpg (não é chamada via /q).
+  # Só devolve foto de produto ativo.
+  foto_produto:
+    resposta: imagem
+    descricao: Foto de um produto (binário).
+    params:
+      - nome: codigo
+        tipo: inteiro
+        obrigatorio: true
+        exemplo: "1"
+      - nome: seq
+        tipo: inteiro
+        obrigatorio: true
+        exemplo: "1"
+    sql: |
+      SELECT pf.FOTO
+      FROM PRODUTOFOTO pf
+      JOIN PRODUTO p ON p.IDPRODUTO = pf.IDPRODUTO
+      WHERE pf.IDPRODUTO = :codigo AND pf.SEQ = :seq
+        AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
 
   estoque_por_loja:
     descricao: >
@@ -193,11 +262,11 @@ consultas:
         f.IDFILIAL AS filial,
         COALESCE(f.NOMEFANTASIA, f.NOMEFILIAL) AS loja,
         f.CIDADE   AS cidade,
-        e.ESTOQUE  AS estoque
+        e.QTDER  AS estoque
       FROM ESTOQUE e
       JOIN FILIAL f ON f.IDFILIAL = e.IDFILIAL
-      WHERE e.IDPRODUTO = :codigo AND e.ESTOQUE > 0
-      ORDER BY e.ESTOQUE DESC
+      WHERE e.IDPRODUTO = :codigo AND e.QTDER > 0
+      ORDER BY e.QTDER DESC
 
   promocoes_vigentes:
     descricao: >
@@ -219,15 +288,16 @@ consultas:
         SELECT
           p.IDPRODUTO        AS codigo,
           p.DESCRICAOPRODUTO AS descricao,
-          m.NOMEMARCA        AS marca,
+          COALESCE(m.NOMEMARCA, fa.NOMEFABRICANTE) AS marca,
           p.PRECOAVISTA      AS preco_normal,
           pp.PRECOAVISTA     AS preco_promocional,
           CAST(pp.DATAFIM AS DATE) AS valida_ate,
-          CASE WHEN e.ESTOQUE > 0 THEN e.ESTOQUE ELSE 0 END AS estoque_loja,
+          CASE WHEN e.QTDER > 0 THEN e.QTDER ELSE 0 END AS estoque_loja,
           ROUND((p.PRECOAVISTA - pp.PRECOAVISTA) * 100 / NULLIF(p.PRECOAVISTA, 0), 1) AS desconto_perc
         FROM PRODUTOPROMOCAO pp
         JOIN PRODUTO p           ON p.IDPRODUTO = pp.IDPRODUTO
         LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
+        LEFT JOIN FABRICANTE fa  ON fa.IDFABRICANTE = p.IDFABRICANTE
         LEFT JOIN ESTOQUE e      ON e.IDPRODUTO = p.IDPRODUTO AND e.IDFILIAL = pp.IDFILIAL
         WHERE pp.IDFILIAL = CAST(:filial AS VARCHAR(10))
           AND CURRENT_DATE BETWEEN CAST(pp.DATAINI AS DATE) AND CAST(pp.DATAFIM AS DATE)
@@ -238,12 +308,13 @@ consultas:
           AND p.DESCRICAOPRODUTO CONTAINING :busca_3
         UNION ALL
         SELECT
-          p.IDPRODUTO, p.DESCRICAOPRODUTO, m.NOMEMARCA, p.PRECOAVISTA, p.PRECOPROMOCAO,
+          p.IDPRODUTO, p.DESCRICAOPRODUTO, COALESCE(m.NOMEMARCA, fa.NOMEFABRICANTE), p.PRECOAVISTA, p.PRECOPROMOCAO,
           CAST(p.DATAFIMPROMOCAO AS DATE),
-          CASE WHEN e.ESTOQUE > 0 THEN e.ESTOQUE ELSE 0 END,
+          CASE WHEN e.QTDER > 0 THEN e.QTDER ELSE 0 END,
           ROUND((p.PRECOAVISTA - p.PRECOPROMOCAO) * 100 / NULLIF(p.PRECOAVISTA, 0), 1)
         FROM PRODUTO p
         LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
+        LEFT JOIN FABRICANTE fa  ON fa.IDFABRICANTE = p.IDFABRICANTE
         LEFT JOIN ESTOQUE e      ON e.IDPRODUTO = p.IDPRODUTO AND e.IDFILIAL = CAST(:filial AS VARCHAR(10))
         WHERE p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
           AND CURRENT_DATE BETWEEN COALESCE(CAST(p.DATAINICIOPROMOCAO AS DATE), CURRENT_DATE)
@@ -524,7 +595,8 @@ consultas:
     descricao: >
       "O que eu comprei?" / "Cadê meu pedido?" / "Quando entrega?" / "Quando vem o montador?".
       Últimas 10 compras do cliente (não canceladas) com itens, valor, nota fiscal, se é entrega
-      em casa e as datas de entrega e montagem registradas no ERP.
+      em casa e as datas de entrega e montagem registradas no ERP. Em itens, "(entregue)" marca
+      o que já foi entregue; itens_pendentes = quantos ainda faltam entregar.
     max_linhas: 10
     params:
       - nome: documento
@@ -541,12 +613,20 @@ consultas:
         CASE WHEN s.ENTREGARADOMICILIO IN ('S', 'T') THEN 'S' ELSE 'N' END AS entrega_domicilio,
         CAST(s.DATAENTREGA AS DATE)  AS data_entrega,
         CAST(s.DATAMONTAGEM AS DATE) AS data_montagem,
-        (SELECT LIST(CAST(CAST(i.QTDE AS INTEGER) AS VARCHAR(10)) || 'x ' || p.DESCRICAOPRODUTO, ' | ')
+        -- Itens com IDPRODUTOREFERENCIA são garantia estendida, não produto (VIEWFATURAMENTO).
+        (SELECT LIST(CAST(CAST(i.QTDE AS INTEGER) AS VARCHAR(10)) || 'x ' || p.DESCRICAOPRODUTO
+                     || CASE WHEN i.ENTREGUE IN ('S', 'T') THEN ' (entregue)' ELSE '' END, ' | ')
            FROM ITEMSAIDA i JOIN PRODUTO p ON p.IDPRODUTO = i.IDPRODUTO
-          WHERE i.IDFILIAL = s.IDFILIAL AND i.NUMEROSAIDA = s.NUMEROSAIDA) AS itens
+          WHERE i.IDFILIAL = s.IDFILIAL AND i.NUMEROSAIDA = s.NUMEROSAIDA
+            AND i.IDPRODUTOREFERENCIA IS NULL) AS itens,
+        (SELECT COUNT(*) FROM ITEMSAIDA i
+          WHERE i.IDFILIAL = s.IDFILIAL AND i.NUMEROSAIDA = s.NUMEROSAIDA
+            AND i.IDPRODUTOREFERENCIA IS NULL
+            AND COALESCE(i.ENTREGUE, 'F') NOT IN ('S', 'T')) AS itens_pendentes
       FROM SAIDA s
       WHERE s.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
-        AND s.DATACANCELAMENTO IS NULL
+        AND s.STATUS = 'A'
+        AND s.TIPOSAIDA IN ('1', '2', '9')
       ORDER BY s.DATASAIDA DESC
 
   # PEDIDOVENDA está vazia na Sonho Real: desligada para a IA (admin) para ela não dizer
@@ -773,6 +853,26 @@ consultas:
       FROM RDB$PROCEDURE_PARAMETERS pp
       WHERE pp.RDB$PROCEDURE_NAME = UPPER(CAST(:nome AS VARCHAR(63)))
       ORDER BY 1, 2
+
+  diag_estoque:
+    admin: true
+    descricao: >
+      Compara as duas colunas de saldo da tabela ESTOQUE por filial: QTDER (a que o fornecedor
+      usa na VIEWESTOQUE) e ESTOQUE. Só produtos ativos.
+    params: []
+    sql: |
+      SELECT
+        e.IDFILIAL AS filial,
+        COUNT(*) AS produtos,
+        SUM(CASE WHEN e.QTDER > 0 THEN 1 ELSE 0 END)   AS com_qtder,
+        SUM(CASE WHEN e.ESTOQUE > 0 THEN 1 ELSE 0 END) AS com_estoque,
+        SUM(CASE WHEN e.QTDER > 0 THEN e.QTDER ELSE 0 END)     AS soma_qtder,
+        SUM(CASE WHEN e.ESTOQUE > 0 THEN e.ESTOQUE ELSE 0 END) AS soma_estoque
+      FROM ESTOQUE e
+      JOIN PRODUTO p ON p.IDPRODUTO = e.IDPRODUTO
+      WHERE COALESCE(p.ATIVO, 'T') IN ('S', 'T')
+      GROUP BY e.IDFILIAL
+      ORDER BY 1
 
   diag_fotos:
     admin: true

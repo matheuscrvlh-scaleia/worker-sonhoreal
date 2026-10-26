@@ -24,9 +24,12 @@ type Arquivo struct {
 }
 
 type Consulta struct {
-	Nome      string   `yaml:"-" json:"nome"`
-	Descricao string   `yaml:"descricao" json:"descricao"`
-	Admin     bool     `yaml:"admin" json:"-"`
+	Nome      string `yaml:"-" json:"nome"`
+	Descricao string `yaml:"descricao" json:"descricao"`
+	Admin     bool   `yaml:"admin" json:"-"`
+	// Resposta "imagem": a 1ª coluna é um BLOB de imagem, servido pela rota /foto
+	// (pública, sem token). Não aparece na lista de consultas para a IA.
+	Resposta  string   `yaml:"resposta" json:"-"`
 	MaxLinhas int      `yaml:"max_linhas" json:"-"`
 	Params    []*Param `yaml:"params" json:"params"`
 	SQL       string   `yaml:"sql" json:"-"`
@@ -91,6 +94,9 @@ func (c *Consulta) preparar() error {
 	inicio := strings.ToUpper(strings.TrimSpace(c.SQL))
 	if !strings.HasPrefix(inicio, "SELECT") && !strings.HasPrefix(inicio, "WITH") {
 		return fmt.Errorf("só SELECT é permitido")
+	}
+	if c.Resposta != "" && c.Resposta != "imagem" {
+		return fmt.Errorf("resposta %q desconhecida (use imagem ou deixe vazio)", c.Resposta)
 	}
 	disponiveis := map[string]bool{}
 	for _, p := range c.Params {
@@ -316,7 +322,7 @@ func numeroBR(s string) (float64, error) {
 func (cj *Conjunto) Publicas() []*Consulta {
 	var out []*Consulta
 	for _, c := range cj.Consultas {
-		if !c.Admin {
+		if !c.Admin && c.Resposta == "" {
 			out = append(out, c)
 		}
 	}

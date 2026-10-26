@@ -153,6 +153,9 @@ Até 15 linhas. Primeiro os produtos com estoque na loja, depois os com mais est
 | `preco_promocional` | preço em promoção hoje, ou `null` |
 | `estoque_loja` | unidades na loja da `filial` (> 0 = pronta entrega) |
 | `estoque_total` | unidades somadas em todas as lojas e no depósito |
+| `foto_url` | link da foto principal (seção 4.5), ou `null` se o produto não tem foto |
+
+`marca` vem do fabricante cadastrado (ex.: `GAZIN`), e a busca também procura por ele: `"colchao gazin"` funciona.
 
 **Dicas para a IA montar a `busca`:**
 - termos curtos e no singular: `"colchao casal"`, `"guarda roupa 6 portas"`, `"moto g06"`;
@@ -180,6 +183,17 @@ Campos: os mesmos de `buscar_produto`, mais:
 | `aplicacao`, `descricao_site`, `dados_tecnicos`, `itens_inclusos` | textos do cadastro (podem ser `null`) |
 | `tem_montagem`, `montagem_gratis`, `frete_gratis` | `S`/`N` |
 | `aceita_desconto` | `N` = não negociar preço |
+| `foto_url` | link da foto principal, ou `null` |
+| `fotos` | quantas fotos o produto tem (todas em `fotos_produto`) |
+
+#### `fotos_produto`
+"Tem mais fotos?" Links de todas as fotos de um produto.
+
+| Parâmetro | Obrig. | Exemplo |
+|---|---|---|
+| `codigo` | sim | `14818` |
+
+Até 20 linhas, na ordem do cadastro. Campos: `seq`, `url`.
 
 #### `estoque_por_loja`
 Em quais lojas (e no depósito) tem o produto. Use quando `estoque_loja` = 0 mas `estoque_total` > 0.
@@ -333,7 +347,8 @@ Até 36 linhas, da mais antiga para a mais nova.
 | Campo | |
 |---|---|
 | `filial`, `venda`, `data`, `total`, `nota_fiscal` | |
-| `itens` | texto: `"1x COLCHAO ... \| 2x TRAVESSEIRO ..."` |
+| `itens` | texto: `"1x COLCHAO ... (entregue) \| 1x GUARDA ROUPA ..."`. Itens de garantia estendida não aparecem. |
+| `itens_pendentes` | quantos itens ainda não foram entregues (0 = tudo entregue) |
 | `entrega_domicilio` | `S`/`N` |
 | `data_entrega`, `data_montagem` | quando registradas no ERP; senão `null` |
 
@@ -344,13 +359,33 @@ Até 36 linhas, da mais antiga para a mais nova.
 
 Campos: `filial`, `nome`, `endereco`, `numero`, `bairro`, `cidade`, `uf`, `cep`, `telefones`, `email`.
 
+### 4.5 Fotos dos produtos
+
+`GET /foto/{codigo}/{seq}.jpg` devolve a imagem direto: JPEG ou PNG, não JSON.
+
+- **Sem token.** O WhatsApp precisa baixar a imagem por URL, e foto de catálogo é pública.
+- Você não precisa montar a URL: ela vem pronta em `foto_url` (`buscar_produto`,
+  `detalhe_produto`) e em `fotos_produto`.
+- Foto acima de 1 MB é reduzida para no máximo 1600 px e regravada em JPEG, dentro do limite de
+  imagem do WhatsApp.
+- Só serve foto de produto ativo. Foto inexistente: **404**.
+- A Cloudflare guarda a imagem por 24 h, então o PC da loja só é consultado na primeira vez.
+
+Para enviar no WhatsApp (Cloud API da Meta), use a URL como `link` da mensagem de imagem:
+```json
+{ "type": "image", "image": { "link": "https://sonhoreal-erp.scaleia.ai/foto/14818/1.jpg", "caption": "Guarda-roupa Milano 6 portas – R$ 999,00" } }
+```
+
+Hoje 1.801 dos 1.913 produtos ativos (94%) têm foto.
+
 ---
 
 ## 5. Fluxos sugeridos para a IA
 
 **Produto e preço**
 1. `buscar_produto` com os termos do cliente.
-2. Muitos resultados: pergunte modelo, tamanho ou cor. Um só: `detalhe_produto`.
+2. Muitos resultados: pergunte modelo, tamanho ou cor. Um só: `detalhe_produto`, e mande a
+   foto (`foto_url`) junto com o preço. Se o cliente pedir mais fotos, use `fotos_produto`.
 3. Sem estoque na loja e com `estoque_total` > 0: `estoque_por_loja` para oferecer outra loja ou
    entrega a partir do depósito.
 4. "Quanto fica parcelado?": `simular_parcelamento` com `preco_aprazo`.
@@ -394,7 +429,9 @@ documento. Dá para gerar as tools da IA automaticamente a partir dela.
 | Endpoint | |
 |---|---|
 | `GET /q/diag_versao` | versão do Firebird e charset |
-| `GET /q/diag_status`, `diag_receber`, `diag_receber_amostra`, `diag_flags` | conferência das regras de negócio |
+| `GET /q/diag_status`, `diag_receber`, `diag_receber_amostra`, `diag_flags`, `diag_estoque` | conferência das regras de negócio |
+| `GET /q/diag_views`, `diag_view_colunas?nome=VIEWPRODUTOS` | código das views do fornecedor do ERP |
+| `GET /q/diag_fotos`, `diag_fotos_amostra` | o que existe de foto no banco |
 | `GET /q/diag_amostra_clientes`, `diag_amostra_produtos`, `diag_indices` | formato dos dados e índices |
 | `GET /q/pedidos_cliente`, `assistencias_cliente` | desligadas para a IA: `PEDIDOVENDA` e `ASSISTENCIA` estão vazias neste ERP |
 | `POST /admin/atualizar` | pede atualização imediata (quando a auto-atualização estiver ligada) |
@@ -430,7 +467,8 @@ A execução da tool é sempre a mesma: `POST /q/{name}` com os argumentos no bo
 | Ponto | Situação |
 |---|---|
 | Dados | hoje a API lê uma **cópia de backup** do banco (23/10/2026) no PC da Leila. Preço, estoque e títulos não refletem o dia até ela apontar para o servidor real. |
-| Estoque | todos os colchões consultados vieram com estoque 0. Ainda não se sabe se é real ou se o ERP controla saldo em outro campo. |
+| Estoque | lido de `ESTOQUE.QTDER`, a mesma coluna da `VIEWESTOQUE` do fornecedor (corrigido em 26/10: antes vinha tudo zerado). |
+| Cloudflare Access | quando for ativado, `/foto/*` precisa de uma regra **Bypass**, senão o WhatsApp não consegue baixar as imagens. |
 | Parcelamento | o ERP marca 3x–8x e 10x–12x como inativas. Confirmar com a loja antes de confiar na simulação. |
 | Juros de atraso | não calculados (`parcelas_em_aberto` mostra o valor original). |
 | Títulos com status `A` | 15 títulos com significado ainda não confirmado. Hoje não aparecem como dívida. |

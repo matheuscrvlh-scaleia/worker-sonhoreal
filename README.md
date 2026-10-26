@@ -32,6 +32,7 @@ Todos exigem `Authorization: Bearer <token>`, menos o `/health`.
 | | |
 |---|---|
 | `GET /health` | 200 se o banco responde, 503 se não. Traz versão e SHA do `queries.yaml` carregado. |
+| `GET /foto/{codigo}/{seq}.jpg` | Foto do produto, **sem token** (o WhatsApp baixa por URL). Reduz fotos acima de 1 MB. SQL na consulta `foto_produto` (`resposta: imagem`). |
 | `GET /q` | Lista as consultas com descrição e parâmetros. **Use para gerar as tools da IA.** |
 | `GET /q/{nome}?param=valor` | Executa. Também aceita `POST` com JSON. |
 | `POST /admin/atualizar` | (`token_admin`) O agente busca atualização agora, sem esperar os 5 min. |
@@ -44,7 +45,7 @@ Resposta: `{"consulta", "total", "truncado", "ms", "linhas": [...]}`. Erros: `{"
 
 | Pergunta | Consulta |
 |---|---|
-| "Quanto custa X?" / "Tem X?" | `buscar_produto` → `detalhe_produto`, `estoque_por_loja` |
+| "Quanto custa X?" / "Tem X?" | `buscar_produto` → `detalhe_produto`, `estoque_por_loja`, `fotos_produto` |
 | "Tem promoção?" | `promocoes_vigentes` |
 | "Parcela em quantas vezes?" / "Fica quanto em 10x?" | `condicoes_pagamento`, `simular_parcelamento` |
 | "Faz por R$ X?" | `negociar_preco` (o limite de desconto nunca é dito ao cliente) |

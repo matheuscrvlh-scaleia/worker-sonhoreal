@@ -72,6 +72,39 @@ func ForaDoAr(err error) bool {
 }
 
 func (b *Banco) Consultar(ctx context.Context, query string, args []any, maxLinhas int) (*Resultado, error) {
+	var res *Resultado
+	err := b.executar(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var err error
+		res, err = consultar(ctx, tx, query, args, maxLinhas)
+		return err
+	})
+	return res, err
+}
+
+// Binario devolve a primeira coluna da primeira linha como veio do banco, sem
+// conversão de texto (BLOB de imagem). Sem linha ou coluna nula: nil, nil.
+func (b *Banco) Binario(ctx context.Context, query string, args []any) ([]byte, error) {
+	var out []byte
+	err := b.executar(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		var v any
+		err := tx.QueryRowContext(ctx, query, args...).Scan(&v)
+		switch x := v.(type) {
+		case []byte:
+			out = x
+		case string:
+			out = []byte(x)
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	})
+	return out, err
+}
+
+// executar roda fn numa transação curta, somente leitura, com timeout e vaga no limite
+// de consultas simultâneas.
+func (b *Banco) executar(ctx context.Context, fn func(context.Context, *sql.Tx) error) error {
 	ctx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 
@@ -79,30 +112,32 @@ func (b *Banco) Consultar(ctx context.Context, query string, args []any, maxLinh
 	case b.vagas <- struct{}{}:
 		defer func() { <-b.vagas }()
 	case <-ctx.Done():
-		return nil, ErrOcupado
+		return ErrOcupado
 	}
 
 	// Se o Firebird reiniciou, as conexões paradas no pool morreram e só se
 	// descobre isso ao usar. Como é só leitura, repetir com outra conexão é seguro.
-	var res *Resultado
 	var err error
 	for tentativa := 0; tentativa < 3; tentativa++ {
-		res, err = b.consultar(ctx, query, args, maxLinhas)
+		err = b.emTransacao(ctx, fn)
 		if err == nil || !ForaDoAr(err) || ctx.Err() != nil {
 			break
 		}
 	}
-	return res, err
+	return err
 }
 
-func (b *Banco) consultar(ctx context.Context, query string, args []any, maxLinhas int) (*Resultado, error) {
+func (b *Banco) emTransacao(ctx context.Context, fn func(context.Context, *sql.Tx) error) error {
 	tx, err := b.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelReadCommitted})
 	if err != nil {
-		return nil, fmt.Errorf("abrindo transação: %w", err)
+		return fmt.Errorf("abrindo transação: %w", err)
 	}
 	// Somente leitura: rollback e commit têm o mesmo efeito; rollback é o mais seguro.
 	defer tx.Rollback()
+	return fn(ctx, tx)
+}
 
+func consultar(ctx context.Context, tx *sql.Tx, query string, args []any, maxLinhas int) (*Resultado, error) {
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err

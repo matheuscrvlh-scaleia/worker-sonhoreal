@@ -1,6 +1,7 @@
 // Package api expõe as consultas do queries.yaml via HTTP.
 //
 //	GET  /health              sem token; 200 se o banco responde, 503 se não
+//	GET  /foto/{codigo}/{seq}.jpg  sem token; foto do produto (consulta foto_produto)
 //	GET  /q                   lista as consultas (para montar as tools da IA)
 //	GET  /q/{nome}?a=1&b=2    executa (também aceita POST com JSON)
 //	POST /admin/sql           SQL livre, só com token_admin e sql_livre=true
@@ -16,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +26,7 @@ import (
 	"ponte/internal/banco"
 	"ponte/internal/config"
 	"ponte/internal/consultas"
+	"ponte/internal/imagem"
 	"ponte/internal/versao"
 )
 
@@ -99,6 +102,7 @@ func (s *Servidor) VigiarConsultas(ctx context.Context) {
 func (s *Servidor) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /foto/{codigo}/{arquivo}", s.foto)
 	mux.HandleFunc("GET /q", s.autenticado(false, s.listar))
 	mux.HandleFunc("GET /q/{nome}", s.autenticado(false, s.executar))
 	mux.HandleFunc("POST /q/{nome}", s.autenticado(false, s.executar))
@@ -176,6 +180,10 @@ func (s *Servidor) executar(w http.ResponseWriter, r *http.Request) {
 		responder(w, http.StatusForbidden, erro("consulta exige token_admin"))
 		return
 	}
+	if c.Resposta == "imagem" {
+		responder(w, http.StatusBadRequest, erro("consulta de imagem: use /foto/{codigo}/{seq}.jpg"))
+		return
+	}
 	params, err := lerParams(r)
 	if err != nil {
 		responder(w, http.StatusBadRequest, erro(err.Error()))
@@ -223,20 +231,7 @@ func (s *Servidor) rodar(w http.ResponseWriter, r *http.Request, nome, query str
 	res, err := s.banco.Consultar(r.Context(), query, args, max)
 	ms := time.Since(ini).Milliseconds()
 	if err != nil {
-		status := http.StatusInternalServerError
-		switch {
-		case errors.Is(err, banco.ErrOcupado):
-			status = http.StatusServiceUnavailable
-		case banco.ForaDoAr(err):
-			s.log.Printf("ERRO consulta=%s ms=%d: %v", nome, ms, err)
-			responder(w, http.StatusServiceUnavailable, erro("banco do ERP fora do ar ou inacessível"))
-			return
-		case errors.Is(err, context.DeadlineExceeded):
-			status = http.StatusGatewayTimeout
-			err = fmt.Errorf("consulta passou de %ds e foi cancelada", s.cfg.API.TimeoutSegundos)
-		}
-		s.log.Printf("ERRO consulta=%s ms=%d: %v", nome, ms, err)
-		responder(w, status, erro(err.Error()))
+		s.erroBanco(w, nome, ms, err)
 		return
 	}
 	responder(w, http.StatusOK, map[string]any{
@@ -246,6 +241,62 @@ func (s *Servidor) rodar(w http.ResponseWriter, r *http.Request, nome, query str
 		"ms":       ms,
 		"linhas":   res.Linhas,
 	})
+}
+
+// foto serve a imagem de um produto: GET /foto/{codigo}/{seq}.jpg
+//
+// É pública (sem token) porque o WhatsApp precisa baixar a imagem por URL, e foto de
+// catálogo não é dado sensível. O SQL vem da consulta foto_produto (resposta: imagem),
+// que só devolve foto de produto ativo. Cache-Control deixa a Cloudflare guardar a
+// imagem: o PC da loja só é consultado na primeira vez.
+func (s *Servidor) foto(w http.ResponseWriter, r *http.Request) {
+	cj := s.conjunto.Load()
+	if cj == nil {
+		http.Error(w, "indisponível", http.StatusServiceUnavailable)
+		return
+	}
+	c, ok := cj.Consultas[consultaFoto]
+	if !ok || c.Resposta != "imagem" {
+		http.NotFound(w, r)
+		return
+	}
+	arquivo := r.PathValue("arquivo")
+	seq := strings.TrimSuffix(arquivo, path.Ext(arquivo))
+	query, args, err := c.Montar(map[string]string{"codigo": r.PathValue("codigo"), "seq": seq})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ini := time.Now()
+	img, err := s.banco.Binario(r.Context(), query, args)
+	if err != nil {
+		s.erroBanco(w, consultaFoto, time.Since(ini).Milliseconds(), err)
+		return
+	}
+	if len(img) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	img = imagem.Reduzir(img)
+	w.Header().Set("Content-Type", http.DetectContentType(img))
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(img)
+}
+
+const consultaFoto = "foto_produto"
+
+func (s *Servidor) erroBanco(w http.ResponseWriter, nome string, ms int64, err error) {
+	s.log.Printf("ERRO consulta=%s ms=%d: %v", nome, ms, err)
+	switch {
+	case errors.Is(err, banco.ErrOcupado):
+		responder(w, http.StatusServiceUnavailable, erro(err.Error()))
+	case banco.ForaDoAr(err):
+		responder(w, http.StatusServiceUnavailable, erro("banco do ERP fora do ar ou inacessível"))
+	case errors.Is(err, context.DeadlineExceeded):
+		responder(w, http.StatusGatewayTimeout, erro(fmt.Sprintf("consulta passou de %ds e foi cancelada", s.cfg.API.TimeoutSegundos)))
+	default:
+		responder(w, http.StatusInternalServerError, erro(err.Error()))
+	}
 }
 
 // ---------- apoio ----------

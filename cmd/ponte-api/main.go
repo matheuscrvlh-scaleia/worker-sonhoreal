@@ -123,7 +123,14 @@ func rodarTestes(cfg *config.Config, b *banco.Banco) int {
 			}
 		}
 		query, args, err := c.Montar(params)
-		if err == nil {
+		if err == nil && c.Resposta == "imagem" {
+			ini := time.Now()
+			var img []byte
+			if img, err = b.Binario(ctx, query, args); err == nil {
+				fmt.Printf("  OK     %-28s %4dms  imagem de %d bytes\n", nome, time.Since(ini).Milliseconds(), len(img))
+				continue
+			}
+		} else if err == nil {
 			ini := time.Now()
 			var r *banco.Resultado
 			if r, err = b.Consultar(ctx, query, args, 3); err == nil {

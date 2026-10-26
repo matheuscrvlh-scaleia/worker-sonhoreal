@@ -5,8 +5,9 @@ go 1.27.3
 require (
 	github.com/kardianos/service v1.3.0
 	github.com/nakagami/firebirdsql v0.9.23
-	golang.org/x/sys v0.34.0
-	golang.org/x/text v0.22.0
+	golang.org/x/image v0.47.0
+	golang.org/x/sys v0.49.0
+	golang.org/x/text v0.43.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 )

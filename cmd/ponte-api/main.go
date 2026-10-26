@@ -34,6 +34,7 @@ func main() {
 	exe, _ := os.Executable()
 	caminhoCfg := flag.String("config", filepath.Join(filepath.Dir(exe), "config.json"), "caminho do config.json")
 	testar := flag.Bool("testar", false, "testa banco e consultas e sai")
+	queriesTeste := flag.String("queries", "", "com -testar: testa este queries.yaml em vez do que está ao lado do config")
 	flag.Parse()
 
 	cfg, err := config.Carregar(*caminhoCfg)
@@ -50,7 +51,11 @@ func main() {
 	defer b.Fechar()
 
 	if *testar {
-		os.Exit(rodarTestes(cfg, b))
+		caminho := *queriesTeste
+		if caminho == "" {
+			caminho = cfg.Caminho("queries.yaml")
+		}
+		os.Exit(rodarTestes(cfg, b, caminho))
 	}
 
 	arquivoLog := &lumberjack.Logger{Filename: cfg.Caminho(filepath.Join("logs", "api.log")), MaxSize: 10, MaxBackups: 5, MaxAge: 30}
@@ -85,7 +90,7 @@ func main() {
 
 // rodarTestes valida a instalação: conexão, versão do Firebird e cada consulta
 // executada com os exemplos. Pega coluna errada, tipo errado, etc. no banco real.
-func rodarTestes(cfg *config.Config, b *banco.Banco) int {
+func rodarTestes(cfg *config.Config, b *banco.Banco, caminhoQueries string) int {
 	ctx := context.Background()
 	falhas := 0
 
@@ -102,7 +107,7 @@ func rodarTestes(cfg *config.Config, b *banco.Banco) int {
 		fmt.Printf("Firebird %v, charset do banco %v (conexão em %s)\n", res.Linhas[0]["versao"], res.Linhas[0]["charset"], cfg.Banco.Charset)
 	}
 
-	conteudo, err := os.ReadFile(cfg.Caminho("queries.yaml"))
+	conteudo, err := os.ReadFile(caminhoQueries)
 	if err != nil {
 		fmt.Println("queries.yaml:", err)
 		return 1

@@ -29,24 +29,11 @@ function GravarSemBOM([string]$caminho, [string]$texto) {
 $origem = $PSScriptRoot
 New-Item -ItemType Directory -Force $Destino | Out-Null
 $agente = Join-Path $Destino "ponte-agente.exe"
-$api = Join-Path $Destino "ponte-api.exe"
 $cfg = Join-Path $Destino "config.json"
 
-# ---- 1. arquivos
-if (Get-Service PonteERP -ErrorAction SilentlyContinue) {
-  Write-Host "Parando o servico PonteERP para trocar os arquivos..."
-  & $agente parar | Out-Null
-  Start-Sleep -Seconds 3
-}
-if ((Resolve-Path $origem).Path -ne (Resolve-Path $Destino).Path) {
-  foreach ($f in "ponte-agente.exe", "ponte-api.exe", "queries.yaml", "config.exemplo.json", "usuario_leitura.sql", "instalar.ps1") {
-    Copy-Item (Join-Path $origem $f) $Destino -Force
-  }
-}
-
-# ---- 2. config.json (nunca sobrescreve)
+# ---- 1. config.json (nunca sobrescreve)
 if (-not (Test-Path $cfg)) {
-  $c = Get-Content (Join-Path $Destino "config.exemplo.json") -Raw | ConvertFrom-Json
+  $c = Get-Content (Join-Path $origem "config.exemplo.json") -Raw | ConvertFrom-Json
   $c.api.token = NovoToken
   $c.api.token_admin = NovoToken
   GravarSemBOM $cfg ($c | ConvertTo-Json -Depth 5)
@@ -62,17 +49,33 @@ if (-not (Test-Path $cfg)) {
   exit 0
 }
 
-# ---- 3. teste real no banco antes de ligar qualquer coisa
-Write-Host "Testando conexao e consultas..."
-& $api -testar -config $cfg
+# ---- 2. testa a versao NOVA (desta pasta) no banco real ANTES de mexer no que esta rodando
+Write-Host "Testando a versao nova (conexao e consultas)..."
+& (Join-Path $origem "ponte-api.exe") -testar -config $cfg -queries (Join-Path $origem "queries.yaml")
 if ($LASTEXITCODE -ne 0) {
-  Write-Host "Teste falhou: corrija o config.json / queries.yaml e rode de novo." -ForegroundColor Red
+  Write-Host "Teste falhou. NADA foi alterado: a versao que estava rodando continua no ar." -ForegroundColor Red
+  Write-Host "Corrija (config.json, queries.yaml ou GRANT no banco) e rode de novo."
   exit 1
 }
 
-# ---- 4. servico (inicio automatico, reinicia sozinho se cair)
-if (-not (Get-Service PonteERP -ErrorAction SilentlyContinue)) { & $agente instalar }
-& $agente iniciar
+# ---- 3. troca os arquivos (o servico fica parado so durante a copia)
+$existia = [bool](Get-Service PonteERP -ErrorAction SilentlyContinue)
+if ($existia) {
+  Write-Host "Parando o servico PonteERP para trocar os arquivos..."
+  & $agente parar | Out-Null
+  Start-Sleep -Seconds 3
+}
+try {
+  if ((Resolve-Path $origem).Path -ne (Resolve-Path $Destino).Path) {
+    foreach ($f in "ponte-agente.exe", "ponte-api.exe", "queries.yaml", "config.exemplo.json", "usuario_leitura.sql", "instalar.ps1") {
+      Copy-Item (Join-Path $origem $f) $Destino -Force
+    }
+  }
+} finally {
+  # ---- 4. servico (inicio automatico, reinicia sozinho se cair). Sobe mesmo se a copia falhar.
+  if (-not $existia) { & $agente instalar }
+  & $agente iniciar
+}
 
 # ---- 5. tunel Cloudflare
 if ($TokenTunel) {

@@ -1,6 +1,7 @@
-# Integração com o worker da Sonho Real
+# Integração com o worker-fdc
 
-API HTTP que consulta o ERP (Firebird) da Sonho Real Móveis em tempo real. Ela existe para a IA
+O **worker-fdc** é uma API HTTP que consulta em tempo real o FDC, o ERP (Firebird) da Sonho Real
+Móveis. Ela existe para a IA
 do WhatsApp responder perguntas como "quanto custa?", "tem?", "parcela em quantas vezes?", "já sou
 cliente?" e "quanto devo?".
 
@@ -17,6 +18,7 @@ A API é **somente leitura**: nenhuma chamada altera dados no ERP.
 | **Formato** | JSON (UTF-8) |
 
 O token vai **sempre no header**, nunca no body nem na URL. `X-Token: <TOKEN>` também é aceito.
+As únicas rotas sem token são `GET /health` (seção 6) e `GET /foto/...` (seção 4.5).
 
 Há dois tokens, ambos no `C:\ponte\config.json` da máquina da loja:
 
@@ -434,6 +436,7 @@ documento. Dá para gerar as tools da IA automaticamente a partir dela.
 | `GET /q/diag_fotos`, `diag_fotos_amostra` | o que existe de foto no banco |
 | `GET /q/diag_amostra_clientes`, `diag_amostra_produtos`, `diag_indices` | formato dos dados e índices |
 | `GET /q/pedidos_cliente`, `assistencias_cliente` | desligadas para a IA: `PEDIDOVENDA` e `ASSISTENCIA` estão vazias neste ERP |
+| `POST /admin/sql` | SQL livre (só `SELECT`), só se `sql_livre` estiver ligado no config |
 | `POST /admin/atualizar` | pede atualização imediata (quando a auto-atualização estiver ligada) |
 
 ---

@@ -3,10 +3,12 @@
 package consultas
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -63,7 +65,7 @@ var tiposValidos = map[string]bool{
 // (assim um deploy quebrado nunca substitui um que funciona).
 func Carregar(conteudo []byte) (*Conjunto, error) {
 	var a Arquivo
-	if err := yaml.Unmarshal(conteudo, &a); err != nil {
+	if err := yaml.Unmarshal(bytes.TrimPrefix(conteudo, []byte("\xef\xbb\xbf")), &a); err != nil {
 		return nil, fmt.Errorf("YAML inválido: %w", err)
 	}
 	if len(a.Consultas) == 0 {
@@ -294,10 +296,12 @@ func (p *Param) converter(bruto string, valores map[string]any) error {
 	return nil
 }
 
-// numeroBR aceita "1500", "1500.90", "1.500,90" e "1500,90".
+var milharBR = regexp.MustCompile(`^\d{1,3}(\.\d{3})+$`)
+
+// numeroBR aceita "1500", "1500.90", "1.500,90", "1500,90" e "2.000" (= dois mil).
 func numeroBR(s string) (float64, error) {
 	s = strings.TrimSpace(strings.TrimPrefix(strings.ToUpper(strings.ReplaceAll(s, " ", "")), "R$"))
-	if strings.Contains(s, ",") {
+	if strings.Contains(s, ",") || milharBR.MatchString(s) {
 		s = strings.ReplaceAll(s, ".", "")
 		s = strings.ReplaceAll(s, ",", ".")
 	}

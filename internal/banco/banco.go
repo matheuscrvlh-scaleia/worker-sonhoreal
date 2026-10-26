@@ -6,9 +6,12 @@ package banco
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -60,6 +63,14 @@ type Resultado struct {
 	Truncado bool             `json:"truncado"`
 }
 
+// ForaDoAr diz se o erro é de conexão (Firebird parado, rede, socket derrubado),
+// e não de SQL.
+func ForaDoAr(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) || errors.Is(err, driver.ErrBadConn) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
 func (b *Banco) Consultar(ctx context.Context, query string, args []any, maxLinhas int) (*Resultado, error) {
 	ctx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
@@ -71,6 +82,20 @@ func (b *Banco) Consultar(ctx context.Context, query string, args []any, maxLinh
 		return nil, ErrOcupado
 	}
 
+	// Se o Firebird reiniciou, as conexões paradas no pool morreram e só se
+	// descobre isso ao usar. Como é só leitura, repetir com outra conexão é seguro.
+	var res *Resultado
+	var err error
+	for tentativa := 0; tentativa < 3; tentativa++ {
+		res, err = b.consultar(ctx, query, args, maxLinhas)
+		if err == nil || !ForaDoAr(err) || ctx.Err() != nil {
+			break
+		}
+	}
+	return res, err
+}
+
+func (b *Banco) consultar(ctx context.Context, query string, args []any, maxLinhas int) (*Resultado, error) {
 	tx, err := b.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return nil, fmt.Errorf("abrindo transação: %w", err)

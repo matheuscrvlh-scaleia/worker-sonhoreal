@@ -1,0 +1,34 @@
+/*
+  Usuário SOMENTE LEITURA para a ponte. Rodar uma vez, como SYSDBA, no banco do ERP:
+
+    isql -user SYSDBA -password <senha> "localhost:C:\caminho\DADOS.FDB" -i usuario_leitura.sql
+
+  Troque a senha abaixo e coloque a mesma no config.json (banco.senha).
+  Funciona em Firebird 2.5, 3, 4 e 5. Só dá SELECT nas tabelas que o queries.yaml usa:
+  ao criar consulta em tabela nova, acrescente o GRANT dela aqui e rode de novo.
+*/
+
+CREATE USER IA_LEITURA PASSWORD 'TroqueEstaSenha';
+COMMIT;
+
+GRANT SELECT ON PRODUTO                TO USER IA_LEITURA;
+GRANT SELECT ON PRODUTOMARCA           TO USER IA_LEITURA;
+GRANT SELECT ON PRODUTOWEB             TO USER IA_LEITURA;
+GRANT SELECT ON PRODUTOPROMOCAO        TO USER IA_LEITURA;
+GRANT SELECT ON GRUPO                  TO USER IA_LEITURA;
+GRANT SELECT ON SUBGRUPO               TO USER IA_LEITURA;
+GRANT SELECT ON ESTOQUE                TO USER IA_LEITURA;
+GRANT SELECT ON FILIAL                 TO USER IA_LEITURA;
+GRANT SELECT ON CONDPGVENDA            TO USER IA_LEITURA;
+GRANT SELECT ON CONDPGVENDAFATORFILIAL TO USER IA_LEITURA;
+GRANT SELECT ON CLIENTE                TO USER IA_LEITURA;
+GRANT SELECT ON TELEFONES              TO USER IA_LEITURA;
+GRANT SELECT ON SITUACAO               TO USER IA_LEITURA;
+GRANT SELECT ON RECEBER                TO USER IA_LEITURA;
+GRANT SELECT ON PORTADOR               TO USER IA_LEITURA;
+GRANT SELECT ON PEDIDOVENDA            TO USER IA_LEITURA;
+GRANT SELECT ON ITEMPEDIDOVENDA        TO USER IA_LEITURA;
+GRANT SELECT ON SAIDA                  TO USER IA_LEITURA;
+GRANT SELECT ON ITEMSAIDA              TO USER IA_LEITURA;
+GRANT SELECT ON ASSISTENCIA            TO USER IA_LEITURA;
+COMMIT;

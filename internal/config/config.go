@@ -2,15 +2,20 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+// ArquivoAtualizarAgora é criado pelo POST /admin/atualizar e consumido pelo agente.
+const ArquivoAtualizarAgora = "atualizar.agora"
 
 type Config struct {
 	Cliente     string      `json:"cliente"`
@@ -54,6 +59,7 @@ func Carregar(caminho string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	b = bytes.TrimPrefix(b, []byte("\xef\xbb\xbf")) // BOM do Bloco de Notas / PowerShell 5
 	var c Config
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("config.json inválido: %w", err)
@@ -123,4 +129,16 @@ func (b Banco) DSN() string {
 
 func (c *Config) Caminho(nome string) string {
 	return filepath.Join(c.Dir, nome)
+}
+
+// URLLocal é o endereço que o agente usa para falar com a API na mesma máquina.
+func (a API) URLLocal() string {
+	host, porta, err := net.SplitHostPort(a.Escutar)
+	if err != nil {
+		return "http://" + a.Escutar
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, porta)
 }

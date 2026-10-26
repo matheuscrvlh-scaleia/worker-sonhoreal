@@ -1,0 +1,10 @@
+# segredos e estado da máquina do cliente
+config.json
+estado.json
+atualizar.agora
+logs/
+
+# binários e builds
+*.exe
+dist/
+pacote/

@@ -1,0 +1,26 @@
+{
+  "cliente": "sonho-real",
+  "banco": {
+    "host": "127.0.0.1",
+    "porta": 3050,
+    "arquivo": "C:/CAMINHO/DO/ERP/DADOS.FDB",
+    "usuario": "IA_LEITURA",
+    "senha": "TroqueEstaSenha",
+    "charset": "WIN1252",
+    "opcoes": ""
+  },
+  "api": {
+    "escutar": "127.0.0.1:8080",
+    "token": "GERADO_PELO_INSTALADOR",
+    "token_admin": "GERADO_PELO_INSTALADOR",
+    "sql_livre": false,
+    "max_linhas": 200,
+    "timeout_segundos": 15,
+    "max_simultaneas": 4
+  },
+  "atualizacao": {
+    "manifesto_url": "https://updates.scaleia.ai/sonho-real/manifest.json",
+    "chave_publica": "COLE_AQUI_A_CHAVE_PUBLICA",
+    "intervalo_minutos": 5
+  }
+}

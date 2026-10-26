@@ -27,9 +27,6 @@ import (
 	"ponte/internal/versao"
 )
 
-// ArquivoAtualizarAgora é criado pelo /admin/atualizar e consumido pelo agente.
-const ArquivoAtualizarAgora = "atualizar.agora"
-
 type Servidor struct {
 	cfg    *config.Config
 	banco  *banco.Banco
@@ -214,7 +211,7 @@ func (s *Servidor) sqlLivre(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Servidor) atualizarAgora(w http.ResponseWriter, r *http.Request) {
-	if err := os.WriteFile(s.cfg.Caminho(ArquivoAtualizarAgora), []byte(time.Now().Format(time.RFC3339)), 0o644); err != nil {
+	if err := os.WriteFile(s.cfg.Caminho(config.ArquivoAtualizarAgora), []byte(time.Now().Format(time.RFC3339)), 0o644); err != nil {
 		responder(w, http.StatusInternalServerError, erro(err.Error()))
 		return
 	}
@@ -230,6 +227,10 @@ func (s *Servidor) rodar(w http.ResponseWriter, r *http.Request, nome, query str
 		switch {
 		case errors.Is(err, banco.ErrOcupado):
 			status = http.StatusServiceUnavailable
+		case banco.ForaDoAr(err):
+			s.log.Printf("ERRO consulta=%s ms=%d: %v", nome, ms, err)
+			responder(w, http.StatusServiceUnavailable, erro("banco do ERP fora do ar ou inacessível"))
+			return
 		case errors.Is(err, context.DeadlineExceeded):
 			status = http.StatusGatewayTimeout
 			err = fmt.Errorf("consulta passou de %ds e foi cancelada", s.cfg.API.TimeoutSegundos)

@@ -1,0 +1,84 @@
+# Publica uma versão: git tag v1.2.3 && git push --tags
+#
+# Compila, assina o manifesto e sobe tudo para o R2. Os agentes nos clientes
+# pegam a versão nova em até 5 minutos (ou na hora, via POST /admin/atualizar).
+#
+# Configurar uma vez em Settings > Secrets and variables > Actions:
+#   secrets: PONTE_CHAVE_PRIVADA (go run ./cmd/ponte-assinar chaves)
+#            R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ENDPOINT (https://<conta>.r2.cloudflarestorage.com)
+#   variables: R2_BUCKET
+name: publicar
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    env:
+      CLIENTE: sonho-real
+      VERSAO: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Testes
+        run: go vet ./... && go test ./...
+
+      - name: Compilar para Windows
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          mkdir -p dist
+          LD="-s -w -X ponte/internal/versao.Versao=${VERSAO}"
+          go build -ldflags "$LD" -o dist/ponte-api.exe ./cmd/ponte-api
+          go build -ldflags "$LD" -o dist/ponte-agente.exe ./cmd/ponte-agente
+
+      - name: Manifesto assinado
+        env:
+          PONTE_CHAVE_PRIVADA: ${{ secrets.PONTE_CHAVE_PRIVADA }}
+        run: |
+          SHA=$(sha256sum queries.yaml | cut -c1-16)
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          cp queries.yaml "dist/consultas-$SHA.yaml"
+          go run ./cmd/ponte-assinar manifesto -cliente "$CLIENTE" \
+            -api dist/ponte-api.exe -api-url "../bin/ponte-api-${VERSAO}.exe" -api-versao "$VERSAO" \
+            -consultas queries.yaml -consultas-url "consultas-$SHA.yaml" \
+            -saida dist/manifest.json
+
+      - name: Pacote de instalação
+        run: |
+          mkdir pacote
+          cp dist/ponte-api.exe dist/ponte-agente.exe queries.yaml deploy/* pacote/
+          (cd pacote && zip -r ../dist/ponte-windows.zip .)
+
+      - name: Enviar para o R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          BUCKET: ${{ vars.R2_BUCKET }}
+        run: |
+          subir() { aws s3 cp "$1" "s3://$BUCKET/$2" --endpoint-url "$R2_ENDPOINT" ${3:+--cache-control "$3"}; }
+          # Arquivos primeiro, manifesto por último: o manifesto novo nunca aponta para algo que ainda não subiu.
+          subir dist/ponte-api.exe          "bin/ponte-api-${VERSAO}.exe"
+          subir dist/ponte-windows.zip      "bin/ponte-windows-${VERSAO}.zip"
+          subir dist/ponte-windows.zip      "bin/ponte-windows.zip" "no-cache"
+          subir "dist/consultas-$SHA.yaml"  "$CLIENTE/consultas-$SHA.yaml"
+          subir dist/manifest.json.sig      "$CLIENTE/manifest.json.sig" "no-cache"
+          subir dist/manifest.json          "$CLIENTE/manifest.json" "no-cache"
+
+      - name: Guardar o pacote no GitHub também
+        uses: actions/upload-artifact@v4
+        with:
+          name: ponte-windows-${{ github.ref_name }}
+          path: dist/ponte-windows.zip

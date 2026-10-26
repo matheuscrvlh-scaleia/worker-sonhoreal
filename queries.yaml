@@ -738,6 +738,74 @@ consultas:
       UNION ALL SELECT 'CONDPGVENDAGRUPOFATOR linhas', CAST(NULL AS CHAR(1)), COUNT(*) FROM CONDPGVENDAGRUPOFATOR
       ORDER BY 1, 3 DESC
 
+  diag_views:
+    admin: true
+    descricao: >
+      Código SQL das views e procedures VIEW* que o fornecedor do ERP indicou (VIEWPRODUTOS,
+      VIEWESTOQUE, VIEWCLIENTES, VIEWFATURAMENTO). Lê só tabelas de sistema: não precisa de GRANT.
+    max_linhas: 50
+    params: []
+    sql: |
+      SELECT TRIM(r.RDB$RELATION_NAME) AS nome, CAST('VIEW' AS VARCHAR(10)) AS tipo, r.RDB$VIEW_SOURCE AS fonte
+      FROM RDB$RELATIONS r
+      WHERE r.RDB$VIEW_BLR IS NOT NULL AND r.RDB$RELATION_NAME STARTING WITH 'VIEW'
+      UNION ALL
+      SELECT TRIM(p.RDB$PROCEDURE_NAME), 'PROCEDURE', p.RDB$PROCEDURE_SOURCE
+      FROM RDB$PROCEDURES p
+      WHERE p.RDB$PROCEDURE_NAME STARTING WITH 'VIEW'
+      ORDER BY 1
+
+  diag_view_colunas:
+    admin: true
+    descricao: Colunas de uma view, ou parâmetros e colunas de uma procedure, pelo nome.
+    params:
+      - nome: nome
+        tipo: texto
+        obrigatorio: true
+        exemplo: VIEWPRODUTOS
+    sql: |
+      SELECT CAST('coluna' AS VARCHAR(20)) AS tipo, rf.RDB$FIELD_POSITION AS pos, TRIM(rf.RDB$FIELD_NAME) AS nome
+      FROM RDB$RELATION_FIELDS rf
+      WHERE rf.RDB$RELATION_NAME = UPPER(CAST(:nome AS VARCHAR(63)))
+      UNION ALL
+      SELECT CASE WHEN pp.RDB$PARAMETER_TYPE = 0 THEN 'parametro entrada' ELSE 'coluna' END,
+             pp.RDB$PARAMETER_NUMBER, TRIM(pp.RDB$PARAMETER_NAME)
+      FROM RDB$PROCEDURE_PARAMETERS pp
+      WHERE pp.RDB$PROCEDURE_NAME = UPPER(CAST(:nome AS VARCHAR(63)))
+      ORDER BY 1, 2
+
+  diag_fotos:
+    admin: true
+    descricao: Quantas fotos de produto existem no banco, em que formato (binário, miniatura, URL) e o tamanho médio.
+    params: []
+    sql: |
+      SELECT
+        COUNT(*) AS fotos,
+        COUNT(DISTINCT pf.IDPRODUTO) AS produtos_com_foto,
+        COUNT(DISTINCT CASE WHEN COALESCE(p.ATIVO, 'T') IN ('S', 'T') THEN pf.IDPRODUTO END) AS produtos_ativos_com_foto,
+        SUM(CASE WHEN pf.FOTO IS NOT NULL THEN 1 ELSE 0 END) AS com_foto_binaria,
+        SUM(CASE WHEN pf.MINIATURA IS NOT NULL THEN 1 ELSE 0 END) AS com_miniatura,
+        SUM(CASE WHEN pf.URL_FOTO IS NOT NULL THEN 1 ELSE 0 END) AS com_url,
+        AVG(OCTET_LENGTH(pf.FOTO)) AS tamanho_medio_bytes,
+        MAX(OCTET_LENGTH(pf.FOTO)) AS tamanho_maximo_bytes
+      FROM PRODUTOFOTO pf
+      LEFT JOIN PRODUTO p ON p.IDPRODUTO = pf.IDPRODUTO
+
+  diag_fotos_amostra:
+    admin: true
+    descricao: Até 10 fotos de produtos ativos, com nome do arquivo, URL e tamanho.
+    max_linhas: 10
+    params: []
+    sql: |
+      SELECT FIRST 10
+        pf.IDPRODUTO AS codigo, p.DESCRICAOPRODUTO AS produto, pf.SEQ AS seq,
+        pf.NOMEARQUIVO AS arquivo, pf.URL_FOTO AS url,
+        OCTET_LENGTH(pf.FOTO) AS bytes_foto, OCTET_LENGTH(pf.MINIATURA) AS bytes_miniatura
+      FROM PRODUTOFOTO pf
+      JOIN PRODUTO p ON p.IDPRODUTO = pf.IDPRODUTO
+      WHERE COALESCE(p.ATIVO, 'T') IN ('S', 'T')
+      ORDER BY pf.IDPRODUTO DESC
+
   diag_amostra_clientes:
     admin: true
     descricao: Últimos 10 clientes cadastrados, para ver como CPF e telefones são gravados.

@@ -23,6 +23,8 @@ IA (nuvem) ──HTTPS──> Cloudflare Tunnel ──> ponte-api (127.0.0.1:808
 | `deploy/` | `instalar.ps1`, `config.exemplo.json`, `usuario_leitura.sql`. |
 | `arquivos/` | Dicionário do banco exportado do cliente (tabelas, colunas, PK/FK). |
 
+> **Vai integrar a IA/n8n com a ponte?** Veja [docs/INTEGRACAO.md](docs/INTEGRACAO.md).
+
 ## Endpoints
 
 Todos exigem `Authorization: Bearer <token>`, menos o `/health`.

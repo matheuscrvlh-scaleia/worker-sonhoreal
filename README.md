@@ -48,33 +48,31 @@ Resposta: `{"consulta", "total", "truncado", "ms", "linhas": [...]}`. Erros: `{"
 | "Faz por R$ X?" | `negociar_preco` (o limite de desconto nunca é dito ao cliente) |
 | "Já sou cliente?" | `cliente_por_telefone` (identifica) → `cliente_por_documento` (pede o CPF) |
 | "Quanto devo?" / "Manda o boleto" | `parcelas_em_aberto` (com PIX copia e cola quando o ERP gera) |
-| "Cadê meu pedido?" / "Quando monta?" | `pedidos_cliente`, `compras_cliente` |
-| "E a assistência?" | `assistencias_cliente` |
+| "O que comprei?" / "Cadê meu pedido?" / "Quando monta?" | `compras_cliente` (vendas em `SAIDA`) |
 | "Onde fica a loja?" | `lojas` |
 | (instalação) | `diag_*`, só com `token_admin` |
+
+`pedidos_cliente` e `assistencias_cliente` existem, mas estão restritas ao `token_admin`: na Sonho
+Real, `PEDIDOVENDA` e `ASSISTENCIA` estão vazias, e a IA diria "você não tem pedidos" a quem comprou.
 
 Regra de privacidade: o telefone **identifica**, mas não **autentica**. Dado financeiro ou de pedido só
 depois de o cliente informar o CPF.
 
 ## Antes de ligar para clientes reais ⚠️
 
-As consultas foram escritas a partir do dicionário do banco e testadas num Firebird 2.5 com a mesma
-estrutura e dados fictícios. **O significado dos códigos de status não vem no dicionário.** Rode os
-`diag_*` no banco real e confira:
+As consultas rodam sem erro no banco real (backup de 23/10/2026, Firebird 3.0.10). O cabeçalho do
+`queries.yaml` registra o que o diagnóstico mostrou (sim/não = `T`/`F`, `VALORPAGO` vazio,
+tabelas vazias). Ainda falta confirmar:
 
-1. **`diag_status`**: o que é título em aberto no `RECEBER`? Hoje o critério é saldo > 0 e
-   `STATUS <> 'C'`. Se título pago não preenche `VALORPAGO`, troque pelo status de aberto em
-   `parcelas_em_aberto` e `cliente_por_documento`. **Sem isso a IA pode cobrar o que já foi pago.**
-2. **`lojas`**: qual é o código da loja principal? Ajuste o `padrao: "01"` dos parâmetros `filial`.
-3. **`diag_amostra_produtos`** e **`diag_amostra_clientes`**: veja como descrição, CPF e telefone
-   estão gravados.
-4. **`negociar_preco`**: confirme com a loja o desconto máximo (`desconto_maximo_loja`, hoje 5%,
+1. **Título em aberto = `RECEBER.STATUS '0'`** (dedução: `1` são 387 mil títulos e R$ 73 mi de
+   histórico; `0` são 11 mil e R$ 2,3 mi). Confirme com `diag_receber` (status quitado tem quase
+   tudo `com_baixa`) e abra no ERP 2 ou 3 títulos do `diag_receber_amostra`. **Sem isso a IA pode
+   cobrar o que já foi pago.**
+2. **`negociar_preco`**: confirme com a loja o desconto máximo (`desconto_maximo_loja`, hoje 5%,
    usado quando o grupo não define `PERCDESCONTO`).
-5. **`simular_parcelamento`**: compare com uma venda real a prazo no ERP (o fator da condição
-   multiplica o preço a prazo?).
-6. **`diag_indices`**: `PEDIDOVENDA` não tem FK em `DOCTOCLIENTE`. Se não houver índice, a
-   consulta de pedidos lê a tabela inteira. Funciona, mas criar índice no banco do ERP só com o
-   aval de quem dá suporte ao ERP.
+3. **Parcelamento**: todas as condições têm fator 1, ou seja, até 15x sem juros. Confira com a loja
+   e com o `diag_flags`: se `CONDPGVENDAGRUPOFATOR` tiver linhas, há juros por grupo de produto
+   que a simulação ainda não aplica.
 
 ## Instalação na máquina do cliente (uma vez)
 

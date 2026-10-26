@@ -9,12 +9,22 @@
 #   telefone   -> :x (dígitos, sem o 55) e :x_final8 (últimos 8 dígitos)
 #   palavras   -> :x (texto inteiro) e :x_1 ... :x_N (cada termo; os que sobram ficam '')
 # "fixo: true" = a IA não consegue alterar, vale sempre o padrao.
+# "admin: true" = só com token_admin (diagnóstico ou consulta desligada).
 #
-# Regras de Firebird 2.5 seguidas aqui (não remova):
+# Regras de Firebird seguidas aqui (não remova):
 #   - parâmetro comparado com coluna CHAR/VARCHAR vai com CAST(:x AS VARCHAR(n)),
 #     senão um valor maior que a coluna dá "string truncation";
 #   - nada de ":x IS NULL" (o 2.5 não descobre o tipo do parâmetro);
 #   - CONTAINING não diferencia maiúscula/minúscula e "CONTAINING ''" é sempre verdadeiro.
+#
+# O que o banco da Sonho Real mostrou (diagnóstico de 26/10/2026, Firebird 3.0.10, charset NONE):
+#   - sim/não é gravado como 'T'/'F' (não 'S'/'N'). Aqui aceitamos os dois:
+#     sim = IN ('S', 'T'), não = NOT IN ('S', 'T');
+#   - RECEBER.VALORPAGO nunca é preenchido: o que diz se o título está pago é o STATUS
+#     (ver "TÍTULOS EM ABERTO" abaixo);
+#   - PEDIDOVENDA, ASSISTENCIA e PRODUTOPROMOCAO estão vazias: a venda é lançada direto em SAIDA;
+#   - CPF gravado só com dígitos; descrições em maiúsculas e sem acento;
+#   - lojas: 01 Bom Jardim/RJ (principal), 02 São José do Calçado/ES; CD, EC, EN são internas.
 #
 # Este arquivo é recarregado sozinho quando muda (sem reiniciar a API).
 # Se o arquivo novo tiver erro, a API continua com o anterior e o /health mostra o erro.
@@ -26,12 +36,12 @@ consultas:
 
   buscar_produto:
     descricao: >
-      "Quanto custa X?" / "Vocês têm X?". Procura produtos ativos pelo nome (termos em qualquer
-      ordem, procurando também na marca e no grupo), pelo código interno, pelo EAN ou pela
+      "Quanto custa X?" / "Vocês têm X?". Procura produtos ativos e com preço pelo nome (termos
+      em qualquer ordem, procurando também no grupo), pelo código interno, pelo EAN ou pela
       referência de fábrica. Devolve preço à vista, a prazo, o promocional (se houver promoção
-      vigente na loja) e o estoque na loja e somado em todas as lojas. Mande termos curtos e no
-      singular (acento tanto faz): "colchao casal ortobom", "guarda roupa 6 portas".
-      Estoque > 0 = tem para pronta entrega.
+      vigente), o estoque na loja e o estoque somado de todas as lojas e do depósito.
+      Mande termos curtos e no singular: "colchao casal", "guarda roupa 6 portas", "moto g06".
+      estoque_loja > 0 = pronta entrega na loja; só estoque_total > 0 = tem no depósito/outra loja.
     max_linhas: 15
     params:
       - nome: busca
@@ -42,10 +52,10 @@ consultas:
       - nome: filial
         tipo: texto
         padrao: "01"
-        descricao: código da loja (consulta lojas). Sem informar, usa a loja principal.
+        descricao: código da loja (consulta lojas). Sem informar, usa a loja de Bom Jardim.
         exemplo: "01"
     sql: |
-      SELECT FIRST 15
+      SELECT
         p.IDPRODUTO        AS codigo,
         p.DESCRICAOPRODUTO AS descricao,
         m.NOMEMARCA        AS marca,
@@ -59,47 +69,60 @@ consultas:
               AND CURRENT_DATE BETWEEN CAST(pp.DATAINI AS DATE) AND CAST(pp.DATAFIM AS DATE)
               AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
             ORDER BY pp.DATAINI DESC),
-          CASE WHEN p.PROMOCAO = 'S' AND p.PRECOPROMOCAO > 0
+          CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
                 AND CURRENT_DATE BETWEEN COALESCE(CAST(p.DATAINICIOPROMOCAO AS DATE), CURRENT_DATE)
                                      AND COALESCE(CAST(p.DATAFIMPROMOCAO AS DATE), CURRENT_DATE)
                THEN p.PRECOPROMOCAO END
         )                  AS preco_promocional,
-        CASE WHEN e.ESTOQUE > 0 THEN e.ESTOQUE ELSE 0 END AS estoque_loja,
-        (SELECT COALESCE(SUM(e2.ESTOQUE), 0) FROM ESTOQUE e2
-          WHERE e2.IDPRODUTO = p.IDPRODUTO AND e2.ESTOQUE > 0) AS estoque_total
+        t.estoque_loja,
+        t.estoque_total
       FROM (
-        -- "texto": descrição + marca + grupo em maiúsculas e sem acento, para
-        -- "colchao" achar "COLCHÃO". Só filtra; o resto das colunas vem de fora.
-        SELECT
-          p0.IDPRODUTO AS id, p0.EAN AS ean, p0.REFERENCIAFABRICA AS referencia,
-          REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-            UPPER(p0.DESCRICAOPRODUTO || ' ' || COALESCE(m0.NOMEMARCA, '') || ' ' || COALESCE(g0.NOMEGRUPO, '')),
-            'Á', 'A'), 'À', 'A'), 'Â', 'A'), 'Ã', 'A'), 'É', 'E'), 'Ê', 'E'), 'Í', 'I'),
-            'Ó', 'O'), 'Ô', 'O'), 'Õ', 'O'), 'Ú', 'U'), 'Ü', 'U'), 'Ç', 'C') AS texto
-        FROM PRODUTO p0
-        LEFT JOIN PRODUTOMARCA m0 ON m0.IDMARCA = p0.IDMARCA
-        LEFT JOIN GRUPO g0        ON g0.IDGRUPO = p0.IDGRUPO
-        WHERE COALESCE(p0.ATIVO, 'S') <> 'N'
-          AND COALESCE(p0.FORADELINHA, 'N') <> 'S'
-      ) b
-      JOIN PRODUTO p            ON p.IDPRODUTO = b.id
-      LEFT JOIN ESTOQUE e       ON e.IDPRODUTO = p.IDPRODUTO AND e.IDFILIAL = CAST(:filial AS VARCHAR(10))
-      LEFT JOIN PRODUTOMARCA m  ON m.IDMARCA = p.IDMARCA
-      LEFT JOIN GRUPO g         ON g.IDGRUPO = p.IDGRUPO
-      WHERE (    b.texto CONTAINING :busca_1
-             AND b.texto CONTAINING :busca_2
-             AND b.texto CONTAINING :busca_3
-             AND b.texto CONTAINING :busca_4)
-         OR CAST(b.id AS VARCHAR(20)) = CAST(:busca AS VARCHAR(300))
-         OR b.ean = CAST(:busca AS VARCHAR(300))
-         OR b.referencia = CAST(:busca AS VARCHAR(300))
-      ORDER BY CASE WHEN e.ESTOQUE > 0 THEN 0 ELSE 1 END, p.DESCRICAOPRODUTO
+        -- Escolhe os 15 primeiros só com o necessário para filtrar e ordenar;
+        -- preço promocional, marca e grupo são buscados depois, só para esses 15.
+        SELECT FIRST 15
+          b.id,
+          CASE WHEN e.ESTOQUE > 0 THEN 0 ELSE 1 END AS sem_estoque_loja,
+          CASE WHEN e.ESTOQUE > 0 THEN e.ESTOQUE ELSE 0 END AS estoque_loja,
+          (SELECT COALESCE(SUM(e2.ESTOQUE), 0) FROM ESTOQUE e2
+            WHERE e2.IDPRODUTO = b.id AND e2.ESTOQUE > 0) AS estoque_total,
+          CASE WHEN b.descricao CONTAINING :busca_1 THEN 0 ELSE 1 END AS so_no_grupo,
+          b.descricao
+        FROM (
+          -- "texto": descrição + marca + grupo em maiúsculas e sem acento.
+          SELECT
+            p0.IDPRODUTO AS id, p0.DESCRICAOPRODUTO AS descricao,
+            p0.EAN AS ean, p0.REFERENCIAFABRICA AS referencia,
+            REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+              UPPER(p0.DESCRICAOPRODUTO || ' ' || COALESCE(m0.NOMEMARCA, '') || ' ' || COALESCE(g0.NOMEGRUPO, '')),
+              'Á', 'A'), 'À', 'A'), 'Â', 'A'), 'Ã', 'A'), 'É', 'E'), 'Ê', 'E'), 'Í', 'I'),
+              'Ó', 'O'), 'Ô', 'O'), 'Õ', 'O'), 'Ú', 'U'), 'Ü', 'U'), 'Ç', 'C') AS texto
+          FROM PRODUTO p0
+          LEFT JOIN PRODUTOMARCA m0 ON m0.IDMARCA = p0.IDMARCA
+          LEFT JOIN GRUPO g0        ON g0.IDGRUPO = p0.IDGRUPO
+          WHERE COALESCE(p0.ATIVO, 'T') IN ('S', 'T')
+            AND COALESCE(p0.FORADELINHA, 'F') NOT IN ('S', 'T')
+            AND p0.PRECOAVISTA > 0
+        ) b
+        LEFT JOIN ESTOQUE e ON e.IDPRODUTO = b.id AND e.IDFILIAL = CAST(:filial AS VARCHAR(10))
+        WHERE (    b.texto CONTAINING :busca_1
+               AND b.texto CONTAINING :busca_2
+               AND b.texto CONTAINING :busca_3
+               AND b.texto CONTAINING :busca_4)
+           OR CAST(b.id AS VARCHAR(20)) = CAST(:busca AS VARCHAR(300))
+           OR b.ean = CAST(:busca AS VARCHAR(300))
+           OR b.referencia = CAST(:busca AS VARCHAR(300))
+        ORDER BY 2, 4 DESC, 5, 6
+      ) t
+      JOIN PRODUTO p           ON p.IDPRODUTO = t.id
+      LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
+      LEFT JOIN GRUPO g        ON g.IDGRUPO = p.IDGRUPO
+      ORDER BY t.sem_estoque_loja, t.estoque_total DESC, t.so_no_grupo, t.descricao
 
   detalhe_produto:
     descricao: >
       Ficha completa de UM produto (use o codigo que veio do buscar_produto): preços, promoção
       com validade, estoque, medidas, garantia, descrição do site, dados técnicos, se tem montagem
-      e frete grátis, e se aceita desconto.
+      e frete grátis, e se aceita desconto. ativo = N: produto fora de linha, não ofereça.
     params:
       - nome: codigo
         tipo: inteiro
@@ -113,6 +136,7 @@ consultas:
       SELECT
         p.IDPRODUTO         AS codigo,
         p.DESCRICAOPRODUTO  AS descricao,
+        CASE WHEN COALESCE(p.ATIVO, 'T') IN ('S', 'T') THEN 'S' ELSE 'N' END AS ativo,
         m.NOMEMARCA         AS marca,
         g.NOMEGRUPO         AS grupo,
         sg.NOMESUBGRUPO     AS subgrupo,
@@ -121,9 +145,14 @@ consultas:
         p.UNIDADEMEDIDA     AS unidade,
         p.PRECOAVISTA       AS preco_avista,
         p.PRECOAPRAZO       AS preco_aprazo,
-        pp.PRECOAVISTA      AS preco_promocional,
-        pp.PRECOAPRAZO      AS preco_promocional_aprazo,
-        CAST(pp.DATAFIM AS DATE) AS promocao_ate,
+        COALESCE(pp.PRECOAVISTA,
+          CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
+                AND CURRENT_DATE BETWEEN COALESCE(CAST(p.DATAINICIOPROMOCAO AS DATE), CURRENT_DATE)
+                                     AND COALESCE(CAST(p.DATAFIMPROMOCAO AS DATE), CURRENT_DATE)
+               THEN p.PRECOPROMOCAO END) AS preco_promocional,
+        COALESCE(CAST(pp.DATAFIM AS DATE),
+          CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
+               THEN CAST(p.DATAFIMPROMOCAO AS DATE) END) AS promocao_ate,
         CASE WHEN e.ESTOQUE > 0 THEN e.ESTOQUE ELSE 0 END AS estoque_loja,
         (SELECT COALESCE(SUM(e2.ESTOQUE), 0) FROM ESTOQUE e2
           WHERE e2.IDPRODUTO = p.IDPRODUTO AND e2.ESTOQUE > 0) AS estoque_total,
@@ -135,10 +164,10 @@ consultas:
         w.DESCRICAOPRODUTOWEB AS descricao_site,
         w.DADOSTECNICOS     AS dados_tecnicos,
         w.ITENSINCLUSOS     AS itens_inclusos,
-        CASE WHEN p.TEMMONTAGEM = 'S' THEN 'S' ELSE 'N' END    AS tem_montagem,
-        CASE WHEN w.MONTAGEMGRATIS = 'S' THEN 'S' ELSE 'N' END AS montagem_gratis,
-        CASE WHEN w.FRETEGRATIS = 'S' THEN 'S' ELSE 'N' END    AS frete_gratis,
-        CASE WHEN p.NAOTEMDESCONTO = 'S' THEN 'N' ELSE 'S' END AS aceita_desconto
+        CASE WHEN p.TEMMONTAGEM IN ('S', 'T') THEN 'S' ELSE 'N' END    AS tem_montagem,
+        CASE WHEN w.MONTAGEMGRATIS IN ('S', 'T') THEN 'S' ELSE 'N' END AS montagem_gratis,
+        CASE WHEN w.FRETEGRATIS IN ('S', 'T') THEN 'S' ELSE 'N' END    AS frete_gratis,
+        CASE WHEN p.NAOTEMDESCONTO IN ('S', 'T') THEN 'N' ELSE 'S' END AS aceita_desconto
       FROM PRODUTO p
       LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
       LEFT JOIN GRUPO g        ON g.IDGRUPO = p.IDGRUPO
@@ -152,8 +181,8 @@ consultas:
 
   estoque_por_loja:
     descricao: >
-      Em quais lojas tem o produto e quantas unidades em cada uma. Use quando não tiver na loja
-      do cliente, para oferecer outra loja ou entrega a partir do depósito.
+      Em quais lojas (e no depósito) tem o produto e quantas unidades em cada uma. Use quando
+      não tiver na loja do cliente, para oferecer outra loja ou entrega a partir do depósito.
     params:
       - nome: codigo
         tipo: inteiro
@@ -172,7 +201,7 @@ consultas:
 
   promocoes_vigentes:
     descricao: >
-      "Tem alguma promoção?" Produtos em promoção hoje na loja, do maior desconto para o menor.
+      "Tem alguma promoção?" Produtos em promoção hoje, do maior desconto para o menor.
       Opcionalmente filtra por termos ("colchao").
     max_linhas: 30
     params:
@@ -203,7 +232,7 @@ consultas:
         WHERE pp.IDFILIAL = CAST(:filial AS VARCHAR(10))
           AND CURRENT_DATE BETWEEN CAST(pp.DATAINI AS DATE) AND CAST(pp.DATAFIM AS DATE)
           AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
-          AND COALESCE(p.ATIVO, 'S') <> 'N'
+          AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
           AND p.DESCRICAOPRODUTO CONTAINING :busca_1
           AND p.DESCRICAOPRODUTO CONTAINING :busca_2
           AND p.DESCRICAOPRODUTO CONTAINING :busca_3
@@ -216,10 +245,10 @@ consultas:
         FROM PRODUTO p
         LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
         LEFT JOIN ESTOQUE e      ON e.IDPRODUTO = p.IDPRODUTO AND e.IDFILIAL = CAST(:filial AS VARCHAR(10))
-        WHERE p.PROMOCAO = 'S' AND p.PRECOPROMOCAO > 0
+        WHERE p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
           AND CURRENT_DATE BETWEEN COALESCE(CAST(p.DATAINICIOPROMOCAO AS DATE), CURRENT_DATE)
                                AND COALESCE(CAST(p.DATAFIMPROMOCAO AS DATE), CURRENT_DATE)
-          AND COALESCE(p.ATIVO, 'S') <> 'N'
+          AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
           AND NOT EXISTS (SELECT 1 FROM PRODUTOPROMOCAO pp2
                            WHERE pp2.IDPRODUTO = p.IDPRODUTO AND pp2.IDFILIAL = CAST(:filial AS VARCHAR(10))
                              AND CURRENT_DATE BETWEEN CAST(pp2.DATAINI AS DATE) AND CAST(pp2.DATAFIM AS DATE))
@@ -251,7 +280,7 @@ consultas:
                         + CASE WHEN c.DIAS7 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS8 IS NOT NULL THEN 1 ELSE 0 END
                         + CASE WHEN c.DIAS9 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS10 IS NOT NULL THEN 1 ELSE 0 END, 0),
                  1)                                         AS parcelas,
-        CASE WHEN c.ENTRADA = 'S' THEN 'S' ELSE 'N' END     AS com_entrada,
+        CASE WHEN c.ENTRADA IN ('S', 'T') THEN 'S' ELSE 'N' END AS com_entrada,
         COALESCE(NULLIF(cf.FATOR, 0), NULLIF(c.FATOR, 0), 1) AS fator,
         c.PERCDESCONTO      AS desconto_perc,
         c.PARCELAMINIMA     AS parcela_minima,
@@ -259,9 +288,9 @@ consultas:
         CAST(c.DATAFINAL AS DATE) AS valida_ate
       FROM CONDPGVENDA c
       LEFT JOIN CONDPGVENDAFATORFILIAL cf ON cf.IDCONDPGVENDA = c.IDCONDPGVENDA AND cf.IDFILIAL = CAST(:filial AS VARCHAR(10))
-      WHERE COALESCE(c.ATIVO, 'S') <> 'N'
-        AND COALESCE(c.RENEGOCIACAO, 'N') <> 'S'
-        AND COALESCE(c.EXCLUSIVA_CLIENTE, 'N') <> 'S'
+      WHERE COALESCE(c.ATIVO, 'T') IN ('S', 'T')
+        AND COALESCE(c.RENEGOCIACAO, 'F') NOT IN ('S', 'T')
+        AND COALESCE(c.EXCLUSIVA_CLIENTE, 'F') NOT IN ('S', 'T')
         AND (c.DATAINICIO IS NULL OR CAST(c.DATAINICIO AS DATE) <= CURRENT_DATE)
         AND (c.DATAFINAL IS NULL OR CAST(c.DATAFINAL AS DATE) >= CURRENT_DATE)
       ORDER BY 3, 2
@@ -297,15 +326,15 @@ consultas:
                           + CASE WHEN c.DIAS7 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS8 IS NOT NULL THEN 1 ELSE 0 END
                           + CASE WHEN c.DIAS9 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS10 IS NOT NULL THEN 1 ELSE 0 END, 0),
                    1) AS parcelas,
-          CASE WHEN c.ENTRADA = 'S' THEN 'S' ELSE 'N' END      AS com_entrada,
+          CASE WHEN c.ENTRADA IN ('S', 'T') THEN 'S' ELSE 'N' END AS com_entrada,
           COALESCE(NULLIF(cf.FATOR, 0), NULLIF(c.FATOR, 0), 1) AS fator,
           CAST(:valor AS DOUBLE PRECISION) * COALESCE(NULLIF(cf.FATOR, 0), NULLIF(c.FATOR, 0), 1) AS total,
           c.PARCELAMINIMA AS parcela_minima
         FROM CONDPGVENDA c
         LEFT JOIN CONDPGVENDAFATORFILIAL cf ON cf.IDCONDPGVENDA = c.IDCONDPGVENDA AND cf.IDFILIAL = CAST(:filial AS VARCHAR(10))
-        WHERE COALESCE(c.ATIVO, 'S') <> 'N'
-          AND COALESCE(c.RENEGOCIACAO, 'N') <> 'S'
-          AND COALESCE(c.EXCLUSIVA_CLIENTE, 'N') <> 'S'
+        WHERE COALESCE(c.ATIVO, 'T') IN ('S', 'T')
+          AND COALESCE(c.RENEGOCIACAO, 'F') NOT IN ('S', 'T')
+          AND COALESCE(c.EXCLUSIVA_CLIENTE, 'F') NOT IN ('S', 'T')
           AND (c.DATAINICIO IS NULL OR CAST(c.DATAINICIO AS DATE) <= CURRENT_DATE)
           AND (c.DATAFINAL IS NULL OR CAST(c.DATAFINAL AS DATE) >= CURRENT_DATE)
       ) x
@@ -361,12 +390,13 @@ consultas:
                   AND CURRENT_DATE BETWEEN CAST(pp.DATAINI AS DATE) AND CAST(pp.DATAFIM AS DATE)
                   AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
                 ORDER BY pp.DATAINI DESC),
-              CASE WHEN p.PROMOCAO = 'S' AND p.PRECOPROMOCAO > 0
+              CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
                     AND CURRENT_DATE BETWEEN COALESCE(CAST(p.DATAINICIOPROMOCAO AS DATE), CURRENT_DATE)
                                          AND COALESCE(CAST(p.DATAFIMPROMOCAO AS DATE), CURRENT_DATE)
                    THEN p.PRECOPROMOCAO END
             ) AS preco_promocional,
-            CASE WHEN p.NAOTEMDESCONTO = 'S' OR g.PROIBIRDESCONTO = 'S' THEN 'S' ELSE 'N' END AS sem_desconto,
+            CASE WHEN p.NAOTEMDESCONTO IN ('S', 'T') OR g.PROIBIRDESCONTO IN ('S', 'T')
+                 THEN 'S' ELSE 'N' END AS sem_desconto,
             g.PERCDESCONTO AS desconto_grupo
           FROM PRODUTO p
           LEFT JOIN GRUPO g ON g.IDGRUPO = p.IDGRUPO
@@ -378,7 +408,11 @@ consultas:
   #
   # Telefone identifica, mas não autentica (número troca de dono, celular da família...).
   # Fluxo sugerido para a IA: cliente_por_telefone para cumprimentar pelo nome; para qualquer
-  # dado financeiro ou de pedido, pedir o CPF e usar as consultas por documento.
+  # dado financeiro ou de compra, pedir o CPF e usar as consultas por documento.
+  #
+  # TÍTULOS EM ABERTO: RECEBER.STATUS = '0'. Deduzido do diag_status (VALORPAGO nunca é
+  # preenchido; '1' = 387 mil títulos/R$ 73 mi = histórico quitado; '0' = 11 mil/R$ 2,3 mi).
+  # CONFIRMAR com diag_receber e diag_receber_amostra antes de ligar para clientes reais.
 
   cliente_por_telefone:
     descricao: >
@@ -391,8 +425,8 @@ consultas:
       - nome: telefone
         tipo: telefone
         obrigatorio: true
-        descricao: número do WhatsApp, em qualquer formato (5511987654321, (11) 98765-4321...)
-        exemplo: "5511987654321"
+        descricao: número do WhatsApp, em qualquer formato (5522987654321, (22) 98765-4321...)
+        exemplo: "5522987654321"
     sql: |
       SELECT FIRST 5
         c.NOMECLIENTE AS nome,
@@ -401,7 +435,7 @@ consultas:
         c.BAIRRO AS bairro,
         CAST(c.DATACADASTRO AS DATE)     AS cliente_desde,
         CAST(c.DATAULTIMACOMPRA AS DATE) AS ultima_compra,
-        CASE WHEN c.ATIVO = 'N' THEN 'N' ELSE 'S' END AS ativo
+        CASE WHEN COALESCE(c.ATIVO, 'T') IN ('S', 'T') THEN 'S' ELSE 'N' END AS ativo
       FROM (
         SELECT c2.DOCTOCLIENTE AS doc FROM CLIENTE c2
         WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(c2.CELULAR, ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', ''), '/', '') CONTAINING :telefone_final8
@@ -444,26 +478,22 @@ consultas:
         c.VALORULTIMACOMPRA AS valor_ultima_compra,
         c.LIMITECREDITO     AS limite_credito,
         s.NOMESITUACAO      AS situacao,
-        CASE WHEN c.ATIVO = 'N' THEN 'N' ELSE 'S' END AS ativo,
-        (SELECT COALESCE(SUM(r.VALOR - COALESCE(r.VALORPAGO, 0)), 0) FROM RECEBER r
-          WHERE r.DOCTOCLIENTE = c.DOCTOCLIENTE
-            AND r.VALOR - COALESCE(r.VALORPAGO, 0) > 0.009 AND COALESCE(r.STATUS, '') <> 'C') AS saldo_devedor,
+        CASE WHEN COALESCE(c.ATIVO, 'T') IN ('S', 'T') THEN 'S' ELSE 'N' END AS ativo,
+        (SELECT COALESCE(SUM(r.VALOR), 0) FROM RECEBER r
+          WHERE r.DOCTOCLIENTE = c.DOCTOCLIENTE AND r.STATUS = '0') AS saldo_devedor,
         (SELECT COUNT(*) FROM RECEBER r
-          WHERE r.DOCTOCLIENTE = c.DOCTOCLIENTE
-            AND r.VALOR - COALESCE(r.VALORPAGO, 0) > 0.009 AND COALESCE(r.STATUS, '') <> 'C'
+          WHERE r.DOCTOCLIENTE = c.DOCTOCLIENTE AND r.STATUS = '0'
             AND CAST(r.VENCIMENTO AS DATE) < CURRENT_DATE) AS parcelas_atrasadas
       FROM CLIENTE c
       LEFT JOIN SITUACAO s ON s.IDSITUACAO = c.IDSITUACAO
       WHERE c.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
 
-  # VALIDAR ANTES DE LIGAR: o critério de "em aberto" abaixo (saldo > 0 e STATUS <> 'C') foi
-  # deduzido da estrutura. Rode diag_status (token_admin) e confira o que cada STATUS do RECEBER
-  # significa; se títulos pagos não preenchem VALORPAGO, troque pelo STATUS de aberto.
   parcelas_em_aberto:
     descricao: >
       "Quanto eu devo?" / "Manda meu boleto". Parcelas em aberto do cliente pelo CPF/CNPJ, da
       mais antiga para a mais nova, com dias de atraso, PIX copia e cola e código de barras
-      quando o ERP tiver gerado. Valores sem juros/multa de atraso.
+      quando o ERP tiver gerado. Valores sem juros/multa de atraso: para o valor atualizado,
+      oriente o cliente a falar com a loja.
     max_linhas: 36
     params:
       - nome: documento
@@ -475,28 +505,57 @@ consultas:
         r.IDFILIAL       AS filial,
         r.NUMERORECEBER  AS titulo,
         r.SEQPARCELA     AS parcela,
+        r.NUMEROSAIDA    AS venda,
         CAST(r.DATAEMISSAO AS DATE) AS emissao,
         CAST(r.VENCIMENTO AS DATE)  AS vencimento,
         r.VALOR                     AS valor,
-        COALESCE(r.VALORPAGO, 0)    AS valor_pago,
-        r.VALOR - COALESCE(r.VALORPAGO, 0) AS saldo,
         CASE WHEN CAST(r.VENCIMENTO AS DATE) < CURRENT_DATE
              THEN DATEDIFF(DAY FROM CAST(r.VENCIMENTO AS DATE) TO CURRENT_DATE) ELSE 0 END AS dias_atraso,
         pt.DESCRICAOPORTADOR  AS forma,
-        r.STATUS              AS status,
         r.QRCODEPIXCOPIAECOLA AS pix_copia_e_cola,
         r.CODIGODEBARRAS      AS codigo_barras
       FROM RECEBER r
       LEFT JOIN PORTADOR pt ON pt.IDPORTADOR = r.IDPORTADOR
       WHERE r.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
-        AND r.VALOR - COALESCE(r.VALORPAGO, 0) > 0.009
-        AND COALESCE(r.STATUS, '') <> 'C'
+        AND r.STATUS = '0'
       ORDER BY r.VENCIMENTO
 
-  pedidos_cliente:
+  compras_cliente:
     descricao: >
-      "Cadê meu pedido?" / "Quando entrega?" / "Quando vem o montador?". Últimos 10 pedidos do
-      cliente (não cancelados) com itens, status, data de entrega e de montagem.
+      "O que eu comprei?" / "Cadê meu pedido?" / "Quando entrega?" / "Quando vem o montador?".
+      Últimas 10 compras do cliente (não canceladas) com itens, valor, nota fiscal, se é entrega
+      em casa e as datas de entrega e montagem registradas no ERP.
+    max_linhas: 10
+    params:
+      - nome: documento
+        tipo: documento
+        obrigatorio: true
+        exemplo: "123.456.789-09"
+    sql: |
+      SELECT FIRST 10
+        s.IDFILIAL      AS filial,
+        s.NUMEROSAIDA   AS venda,
+        CAST(s.DATASAIDA AS DATE) AS data,
+        s.VALTOTNOTA    AS total,
+        s.NUMERONOTAFISCAL AS nota_fiscal,
+        CASE WHEN s.ENTREGARADOMICILIO IN ('S', 'T') THEN 'S' ELSE 'N' END AS entrega_domicilio,
+        CAST(s.DATAENTREGA AS DATE)  AS data_entrega,
+        CAST(s.DATAMONTAGEM AS DATE) AS data_montagem,
+        (SELECT LIST(CAST(CAST(i.QTDE AS INTEGER) AS VARCHAR(10)) || 'x ' || p.DESCRICAOPRODUTO, ' | ')
+           FROM ITEMSAIDA i JOIN PRODUTO p ON p.IDPRODUTO = i.IDPRODUTO
+          WHERE i.IDFILIAL = s.IDFILIAL AND i.NUMEROSAIDA = s.NUMEROSAIDA) AS itens
+      FROM SAIDA s
+      WHERE s.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
+        AND s.DATACANCELAMENTO IS NULL
+      ORDER BY s.DATASAIDA DESC
+
+  # PEDIDOVENDA está vazia na Sonho Real: desligada para a IA (admin) para ela não dizer
+  # "você não tem pedidos" a quem tem compra em SAIDA. Religue tirando o admin se passarem a usar.
+  pedidos_cliente:
+    admin: true
+    descricao: >
+      Últimos 10 pedidos de venda do cliente (não cancelados) com itens, status, data de entrega
+      e de montagem.
     max_linhas: 10
     params:
       - nome: documento
@@ -524,40 +583,11 @@ consultas:
         AND pv.DATACANCELAMENTO IS NULL
       ORDER BY pv.DATAPEDIDOVENDA DESC
 
-  compras_cliente:
-    descricao: >
-      Últimas 10 compras faturadas (vendas/notas) do cliente com itens, valor, nota fiscal e
-      datas de entrega e montagem. Use junto com pedidos_cliente quando o cliente perguntar o
-      que comprou ou sobre garantia.
-    max_linhas: 10
-    params:
-      - nome: documento
-        tipo: documento
-        obrigatorio: true
-        exemplo: "123.456.789-09"
-    sql: |
-      SELECT FIRST 10
-        s.IDFILIAL      AS filial,
-        s.NUMEROSAIDA   AS venda,
-        CAST(s.DATASAIDA AS DATE) AS data,
-        s.VALTOTNOTA    AS total,
-        s.NUMERONOTAFISCAL AS nota_fiscal,
-        s.ENTREGARADOMICILIO AS entrega_domicilio,
-        s.STATUSENTREGA AS status_entrega,
-        CAST(s.DATAENTREGA AS DATE)  AS data_entrega,
-        CAST(s.DATAMONTAGEM AS DATE) AS data_montagem,
-        (SELECT LIST(CAST(CAST(i.QTDE AS INTEGER) AS VARCHAR(10)) || 'x ' || p.DESCRICAOPRODUTO, ' | ')
-           FROM ITEMSAIDA i JOIN PRODUTO p ON p.IDPRODUTO = i.IDPRODUTO
-          WHERE i.IDFILIAL = s.IDFILIAL AND i.NUMEROSAIDA = s.NUMEROSAIDA) AS itens
-      FROM SAIDA s
-      WHERE s.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
-        AND s.DATACANCELAMENTO IS NULL
-      ORDER BY s.DATASAIDA DESC
-
+  # ASSISTENCIA também está vazia: desligada pelo mesmo motivo.
   assistencias_cliente:
+    admin: true
     descricao: >
-      "E o conserto/a troca do meu produto?" Assistências técnicas do cliente com status,
-      previsão e conclusão.
+      Assistências técnicas do cliente com status, previsão e conclusão.
     max_linhas: 10
     params:
       - nome: documento
@@ -598,10 +628,10 @@ consultas:
         f.TELEFONES AS telefones,
         f.EMAIL    AS email
       FROM FILIAL f
+      WHERE COALESCE(TRIM(f.ENDERECO), '') <> ''  -- depósito/encomenda não têm endereço
       ORDER BY COALESCE(f.ORDEMEXIBICAO, 999), f.IDFILIAL
 
   # ============================================================ DIAGNÓSTICO (só token_admin)
-  # Rode uma vez na instalação para conferir as suposições das consultas acima.
 
   diag_versao:
     admin: true
@@ -617,8 +647,8 @@ consultas:
   diag_status:
     admin: true
     descricao: >
-      Valores distintos dos campos de status usados nas consultas, com quantidade. Serve para
-      descobrir o que é "aberto", "pago", "cancelado", "entregue"... Pode demorar alguns segundos.
+      Valores distintos dos campos de status usados nas consultas, com quantidade. Tabela que
+      não aparece está vazia. Pode demorar alguns segundos.
     params: []
     sql: |
       SELECT CAST('RECEBER.STATUS' AS VARCHAR(40)) AS campo, r.STATUS AS valor, COUNT(*) AS qtde,
@@ -626,13 +656,86 @@ consultas:
              SUM(CASE WHEN r.VALORPAGO IS NULL THEN 1 ELSE 0 END) AS sem_valorpago
         FROM RECEBER r GROUP BY r.STATUS
       UNION ALL SELECT 'PEDIDOVENDA.STATUS', STATUS, COUNT(*), SUM(TOTAL), CAST(NULL AS DOUBLE PRECISION), CAST(NULL AS INTEGER) FROM PEDIDOVENDA GROUP BY STATUS
-      UNION ALL SELECT 'PEDIDOVENDA.STATUSENTREGA', STATUSENTREGA, COUNT(*), NULL, NULL, NULL FROM PEDIDOVENDA GROUP BY STATUSENTREGA
-      UNION ALL SELECT 'PEDIDOVENDA.STATUSMONTAGEM', STATUSMONTAGEM, COUNT(*), NULL, NULL, NULL FROM PEDIDOVENDA GROUP BY STATUSMONTAGEM
       UNION ALL SELECT 'SAIDA.STATUSENTREGA', STATUSENTREGA, COUNT(*), NULL, NULL, NULL FROM SAIDA GROUP BY STATUSENTREGA
       UNION ALL SELECT 'ASSISTENCIA.STATUS', STATUS, COUNT(*), NULL, NULL, NULL FROM ASSISTENCIA GROUP BY STATUS
       UNION ALL SELECT 'PRODUTOPROMOCAO.STATUS', STATUS, COUNT(*), NULL, NULL, NULL FROM PRODUTOPROMOCAO GROUP BY STATUS
       UNION ALL SELECT 'PRODUTO.ATIVO', ATIVO, COUNT(*), NULL, NULL, NULL FROM PRODUTO GROUP BY ATIVO
       UNION ALL SELECT 'CLIENTE.ATIVO', ATIVO, COUNT(*), NULL, NULL, NULL FROM CLIENTE GROUP BY ATIVO
+      ORDER BY 1, 3 DESC
+
+  diag_receber:
+    admin: true
+    descricao: >
+      Títulos emitidos nos últimos 2 anos agrupados por STATUS: vencimentos, quantos ainda vão
+      vencer e quantos têm baixa (pagamento) na tabela RECEBIDO. Status com quase todos "com_baixa"
+      = quitado; status com vencimentos futuros e sem baixa = em aberto.
+    params: []
+    sql: |
+      SELECT
+        r.STATUS AS status,
+        COUNT(*) AS qtde,
+        SUM(r.VALOR) AS soma_valor,
+        MIN(CAST(r.VENCIMENTO AS DATE)) AS venc_mais_antigo,
+        MAX(CAST(r.VENCIMENTO AS DATE)) AS venc_mais_novo,
+        SUM(CASE WHEN r.VENCIMENTO >= CURRENT_DATE THEN 1 ELSE 0 END) AS a_vencer,
+        SUM(CASE WHEN EXISTS (SELECT 1 FROM RECEBIDO rb
+                               WHERE rb.IDFILIAL = r.IDFILIAL AND rb.NUMERORECEBER = r.NUMERORECEBER)
+                 THEN 1 ELSE 0 END) AS com_baixa,
+        SUM(CASE WHEN r.IDSUBSTITUICAO IS NOT NULL THEN 1 ELSE 0 END) AS com_substituicao
+      FROM RECEBER r
+      WHERE r.DATAEMISSAO >= CURRENT_DATE - 730
+      GROUP BY r.STATUS
+      ORDER BY 2 DESC
+
+  diag_receber_amostra:
+    admin: true
+    descricao: >
+      Até 5 títulos recentes de cada STATUS, com cliente e valor, para conferir na tela do ERP
+      o que cada status significa.
+    params: []
+    sql: |
+      SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
+               r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
+             FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
+             WHERE r.STATUS = '0' ORDER BY r.DATAEMISSAO DESC) a
+      UNION ALL
+      SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
+               r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
+             FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
+             WHERE r.STATUS = '1' ORDER BY r.DATAEMISSAO DESC) b
+      UNION ALL
+      SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
+               r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
+             FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
+             WHERE r.STATUS = '2' ORDER BY r.DATAEMISSAO DESC) c2
+      UNION ALL
+      SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
+               r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
+             FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
+             WHERE r.STATUS = '6' ORDER BY r.DATAEMISSAO DESC) d
+      UNION ALL
+      SELECT * FROM (SELECT FIRST 5 r.STATUS AS status, r.IDFILIAL AS filial, r.NUMERORECEBER AS titulo,
+               r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
+             FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
+             WHERE r.STATUS = 'A' ORDER BY r.DATAEMISSAO DESC) e
+
+  diag_flags:
+    admin: true
+    descricao: >
+      Valores dos campos sim/não usados nas consultas de produto e pagamento, e quantas linhas
+      têm as tabelas de fator de parcelamento (se tiverem, o "sem juros" pode não ser real).
+    params: []
+    sql: |
+      SELECT CAST('PRODUTO.FORADELINHA' AS VARCHAR(40)) AS campo, FORADELINHA AS valor, COUNT(*) AS qtde FROM PRODUTO GROUP BY FORADELINHA
+      UNION ALL SELECT 'PRODUTO.PROMOCAO', PROMOCAO, COUNT(*) FROM PRODUTO GROUP BY PROMOCAO
+      UNION ALL SELECT 'PRODUTO.NAOTEMDESCONTO', NAOTEMDESCONTO, COUNT(*) FROM PRODUTO GROUP BY NAOTEMDESCONTO
+      UNION ALL SELECT 'PRODUTO.ATIVO com preco 0', ATIVO, COUNT(*) FROM PRODUTO WHERE COALESCE(PRECOAVISTA, 0) = 0 GROUP BY ATIVO
+      UNION ALL SELECT 'GRUPO.PROIBIRDESCONTO', PROIBIRDESCONTO, COUNT(*) FROM GRUPO GROUP BY PROIBIRDESCONTO
+      UNION ALL SELECT 'GRUPO com PERCDESCONTO > 0', CAST(NULL AS CHAR(1)), COUNT(*) FROM GRUPO WHERE PERCDESCONTO > 0
+      UNION ALL SELECT 'CONDPGVENDA.ATIVO', ATIVO, COUNT(*) FROM CONDPGVENDA GROUP BY ATIVO
+      UNION ALL SELECT 'SAIDA.ENTREGARADOMICILIO', ENTREGARADOMICILIO, COUNT(*) FROM SAIDA GROUP BY ENTREGARADOMICILIO
+      UNION ALL SELECT 'CONDPGVENDAFATORFILIAL linhas', CAST(NULL AS CHAR(1)), COUNT(*) FROM CONDPGVENDAFATORFILIAL
+      UNION ALL SELECT 'CONDPGVENDAGRUPOFATOR linhas', CAST(NULL AS CHAR(1)), COUNT(*) FROM CONDPGVENDAGRUPOFATOR
       ORDER BY 1, 3 DESC
 
   diag_amostra_clientes:

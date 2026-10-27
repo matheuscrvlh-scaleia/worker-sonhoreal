@@ -14,16 +14,18 @@ import (
 	"strings"
 )
 
-// ArquivoAtualizarAgora é criado pelo POST /admin/atualizar e consumido pelo agente.
+// ArquivoAtualizarAgora é criado pelo comando "atualizar" (fdc.comando) e consumido pelo agente.
 const ArquivoAtualizarAgora = "atualizar.agora"
 
 type Config struct {
-	Cliente     string      `json:"cliente"`
-	Banco       Banco       `json:"banco"`
-	API         API         `json:"api"`
-	Atualizacao Atualizacao `json:"atualizacao"`
+	Cliente       string        `json:"cliente"`
+	Banco         Banco         `json:"banco"`
+	Supabase      Supabase      `json:"supabase"`
+	Sincronizacao Sincronizacao `json:"sincronizacao"`
+	Local         Local         `json:"local"`
+	Atualizacao   Atualizacao   `json:"atualizacao"`
 
-	// Pasta do config.json; queries.yaml e logs/ ficam nela.
+	// Pasta do config.json; queries.yaml, estado/ e logs/ ficam nela.
 	Dir string `json:"-"`
 }
 
@@ -38,14 +40,25 @@ type Banco struct {
 	Opcoes string `json:"opcoes"`
 }
 
-type API struct {
-	Escutar         string `json:"escutar"`
-	Token           string `json:"token"`
-	TokenAdmin      string `json:"token_admin"`
-	SQLLivre        bool   `json:"sql_livre"`
-	MaxLinhas       int    `json:"max_linhas"`
-	TimeoutSegundos int    `json:"timeout_segundos"`
-	MaxSimultaneas  int    `json:"max_simultaneas"`
+// Supabase é a Edge Function "fdc" que recebe os dados (supabase/functions/fdc).
+type Supabase struct {
+	URL   string `json:"url"`   // https://<projeto>.supabase.co/functions/v1/fdc
+	Token string `json:"token"` // o mesmo do secret FDC_TOKEN_WORKER da função
+}
+
+type Sincronizacao struct {
+	// Tempo máximo de cada SQL no Firebird (a extração de clientes lê a tabela inteira).
+	TimeoutSegundos int `json:"timeout_segundos"`
+	// Linhas por envio para o Supabase.
+	Lote int `json:"lote"`
+	// De quanto em quanto tempo compara com o que está no Supabase em vez do estado local
+	// (corrige qualquer diferença, inclusive linha apagada à mão lá).
+	ReconciliarHoras int `json:"reconciliar_horas"`
+}
+
+// Local é o /health só da máquina (127.0.0.1): o agente usa para conferir uma versão nova.
+type Local struct {
+	Escutar string `json:"escutar"`
 }
 
 type Atualizacao struct {
@@ -79,21 +92,22 @@ func Carregar(caminho string) (*Config, error) {
 	if c.Banco.Charset == "" {
 		c.Banco.Charset = "WIN1252"
 	}
-	if c.API.Escutar == "" {
-		c.API.Escutar = "127.0.0.1:8080"
+	if c.Sincronizacao.TimeoutSegundos == 0 {
+		c.Sincronizacao.TimeoutSegundos = 120
 	}
-	if c.API.MaxLinhas == 0 {
-		c.API.MaxLinhas = 200
+	if c.Sincronizacao.Lote == 0 {
+		c.Sincronizacao.Lote = 500
 	}
-	if c.API.TimeoutSegundos == 0 {
-		c.API.TimeoutSegundos = 15
+	if c.Sincronizacao.ReconciliarHoras == 0 {
+		c.Sincronizacao.ReconciliarHoras = 24
 	}
-	if c.API.MaxSimultaneas == 0 {
-		c.API.MaxSimultaneas = 4
+	if c.Local.Escutar == "" {
+		c.Local.Escutar = "127.0.0.1:8080"
 	}
 	if c.Atualizacao.IntervaloMinutos == 0 {
 		c.Atualizacao.IntervaloMinutos = 5
 	}
+	c.Supabase.URL = strings.TrimRight(c.Supabase.URL, "/")
 
 	var faltando []string
 	if c.Cliente == "" {
@@ -105,8 +119,11 @@ func Carregar(caminho string) (*Config, error) {
 	if c.Banco.Usuario == "" {
 		faltando = append(faltando, "banco.usuario")
 	}
-	if len(c.API.Token) < 16 {
-		faltando = append(faltando, "api.token (mínimo 16 caracteres)")
+	if !strings.HasPrefix(c.Supabase.URL, "https://") {
+		faltando = append(faltando, "supabase.url (https://...)")
+	}
+	if len(c.Supabase.Token) < 16 {
+		faltando = append(faltando, "supabase.token (mínimo 16 caracteres)")
 	}
 	if len(faltando) > 0 {
 		return nil, errors.New("config.json incompleto: " + strings.Join(faltando, ", "))
@@ -131,11 +148,11 @@ func (c *Config) Caminho(nome string) string {
 	return filepath.Join(c.Dir, nome)
 }
 
-// URLLocal é o endereço que o agente usa para falar com a API na mesma máquina.
-func (a API) URLLocal() string {
-	host, porta, err := net.SplitHostPort(a.Escutar)
+// URLLocal é o endereço que o agente usa para falar com o worker na mesma máquina.
+func (l Local) URLLocal() string {
+	host, porta, err := net.SplitHostPort(l.Escutar)
 	if err != nil {
-		return "http://" + a.Escutar
+		return "http://" + l.Escutar
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
 		host = "127.0.0.1"

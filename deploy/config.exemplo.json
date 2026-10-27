@@ -9,17 +9,20 @@
     "charset": "WIN1252",
     "opcoes": ""
   },
-  "api": {
-    "escutar": "127.0.0.1:8080",
-    "token": "GERADO_PELO_INSTALADOR",
-    "token_admin": "GERADO_PELO_INSTALADOR",
-    "sql_livre": false,
-    "max_linhas": 200,
-    "timeout_segundos": 15,
-    "max_simultaneas": 4
+  "supabase": {
+    "url": "https://mnhtuzsmwacvsymtbyck.supabase.co/functions/v1/fdc",
+    "token": "GERADO_PELO_INSTALADOR"
+  },
+  "sincronizacao": {
+    "timeout_segundos": 120,
+    "lote": 500,
+    "reconciliar_horas": 24
+  },
+  "local": {
+    "escutar": "127.0.0.1:8080"
   },
   "atualizacao": {
-    "manifesto_url": "https://updates.scaleia.ai/sonho-real/manifest.json",
+    "manifesto_url": "https://updates.scaleia.ai/fdc/sonho-real/manifest.json",
     "chave_publica": "uamLprEW7q68EKMTktGZKi9gg+KX8XQZES8eMoLQFNQ=",
     "intervalo_minutos": 5
   }

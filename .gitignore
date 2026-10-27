@@ -9,3 +9,6 @@ logs/
 *.exe
 dist/
 pacote/
+estado/
+supabase/.temp/
+node_modules/

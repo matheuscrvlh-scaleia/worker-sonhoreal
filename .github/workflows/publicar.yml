@@ -1,7 +1,11 @@
 # Publica uma versão: git tag v1.2.3 && git push --tags
 #
 # Compila, assina o manifesto e sobe tudo para o R2. Os agentes nos clientes
-# pegam a versão nova em até 5 minutos (ou na hora, via POST /admin/atualizar).
+# pegam a versão nova em até 5 minutos (ou na hora, com o comando "atualizar" no Supabase).
+#
+# O manifesto fica em fdc/<cliente>/: a instalação antiga (ponte-api, que lia <cliente>/) não
+# enxerga estas versões. A parte do Supabase (migração e Edge Function) não sai daqui: veja
+# docs/ARQUITETURA.md.
 #
 # Configurar uma vez em Settings > Secrets and variables > Actions:
 #   secrets: PONTE_CHAVE_PRIVADA (go run ./cmd/ponte-assinar chaves)
@@ -37,8 +41,8 @@ jobs:
         run: |
           mkdir -p dist
           LD="-s -w -X ponte/internal/versao.Versao=${VERSAO}"
-          go build -ldflags "$LD" -o dist/ponte-api.exe ./cmd/ponte-api
-          go build -ldflags "$LD" -o dist/ponte-agente.exe ./cmd/ponte-agente
+          go build -ldflags "$LD" -o dist/worker-fdc.exe ./cmd/worker-fdc
+          go build -ldflags "$LD" -o dist/worker-fdc-agente.exe ./cmd/worker-fdc-agente
 
       - name: Manifesto assinado
         env:
@@ -48,15 +52,15 @@ jobs:
           echo "SHA=$SHA" >> "$GITHUB_ENV"
           cp queries.yaml "dist/consultas-$SHA.yaml"
           go run ./cmd/ponte-assinar manifesto -cliente "$CLIENTE" \
-            -api dist/ponte-api.exe -api-url "../bin/ponte-api-${VERSAO}.exe" -api-versao "$VERSAO" \
+            -api dist/worker-fdc.exe -api-url "../../bin/worker-fdc-${VERSAO}.exe" -api-versao "$VERSAO" \
             -consultas queries.yaml -consultas-url "consultas-$SHA.yaml" \
             -saida dist/manifest.json
 
       - name: Pacote de instalação
         run: |
           mkdir pacote
-          cp dist/ponte-api.exe dist/ponte-agente.exe queries.yaml deploy/* pacote/
-          (cd pacote && zip -r ../dist/ponte-windows.zip .)
+          cp dist/worker-fdc.exe dist/worker-fdc-agente.exe queries.yaml deploy/* pacote/
+          (cd pacote && zip -r ../dist/worker-fdc-windows.zip .)
 
       - name: Enviar para o R2
         env:
@@ -70,15 +74,15 @@ jobs:
         run: |
           subir() { aws s3 cp "$1" "s3://$BUCKET/$2" --endpoint-url "$R2_ENDPOINT" ${3:+--cache-control "$3"}; }
           # Arquivos primeiro, manifesto por último: o manifesto novo nunca aponta para algo que ainda não subiu.
-          subir dist/ponte-api.exe          "bin/ponte-api-${VERSAO}.exe"
-          subir dist/ponte-windows.zip      "bin/ponte-windows-${VERSAO}.zip"
-          subir dist/ponte-windows.zip      "bin/ponte-windows.zip" "no-cache"
-          subir "dist/consultas-$SHA.yaml"  "$CLIENTE/consultas-$SHA.yaml"
-          subir dist/manifest.json.sig      "$CLIENTE/manifest.json.sig" "no-cache"
-          subir dist/manifest.json          "$CLIENTE/manifest.json" "no-cache"
+          subir dist/worker-fdc.exe              "bin/worker-fdc-${VERSAO}.exe"
+          subir dist/worker-fdc-windows.zip      "bin/worker-fdc-windows-${VERSAO}.zip"
+          subir dist/worker-fdc-windows.zip      "bin/worker-fdc-windows.zip" "no-cache"
+          subir "dist/consultas-$SHA.yaml"      "fdc/$CLIENTE/consultas-$SHA.yaml"
+          subir dist/manifest.json.sig          "fdc/$CLIENTE/manifest.json.sig" "no-cache"
+          subir dist/manifest.json              "fdc/$CLIENTE/manifest.json" "no-cache"
 
       - name: Guardar o pacote no GitHub também
         uses: actions/upload-artifact@v4
         with:
-          name: ponte-windows-${{ github.ref_name }}
-          path: dist/ponte-windows.zip
+          name: worker-fdc-windows-${{ github.ref_name }}
+          path: dist/worker-fdc-windows.zip

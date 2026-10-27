@@ -1,11 +1,18 @@
 # Integração com o worker-fdc
 
-O **worker-fdc** é uma API HTTP que consulta em tempo real o FDC, o ERP (Firebird) da Sonho Real
-Móveis. Ela existe para a IA
-do WhatsApp responder perguntas como "quanto custa?", "tem?", "parcela em quantas vezes?", "já sou
-cliente?" e "quanto devo?".
+O **worker-fdc** mantém no Supabase uma cópia do FDC, o ERP (Firebird) da Sonho Real Móveis.
+A IA do WhatsApp consulta essa cópia para responder perguntas como "quanto custa?", "tem?",
+"parcela em quantas vezes?", "já sou cliente?" e "quanto devo?".
 
-A API é **somente leitura**: nenhuma chamada altera dados no ERP.
+```
+ERP (Firebird, na loja) ──► worker-fdc (PC da loja) ──HTTPS──► Supabase ◄──HTTPS── IA / n8n
+                             copia a cada 5–60 min              cópia + API
+```
+
+- **Somente leitura:** nenhuma chamada altera dados no ERP.
+- **Não depende do PC da loja:** se ele desligar, a IA continua respondendo com a última cópia.
+  Toda resposta diz de quando são os dados (`atualizado_em`, seção 3).
+- O tempo de cópia de cada tipo de dado está na seção 8.
 
 ---
 
@@ -13,23 +20,21 @@ A API é **somente leitura**: nenhuma chamada altera dados no ERP.
 
 | | |
 |---|---|
-| **URL base** | `https://sonhoreal-erp.scaleia.ai` |
+| **URL base** | `https://mnhtuzsmwacvsymtbyck.supabase.co/functions/v1/fdc` |
 | **Autenticação** | header `Authorization: Bearer <TOKEN>` |
 | **Formato** | JSON (UTF-8) |
 
 O token vai **sempre no header**, nunca no body nem na URL. `X-Token: <TOKEN>` também é aceito.
-As únicas rotas sem token são `GET /health` (seção 6) e `GET /foto/...` (seção 4.5).
+A única rota sem token é `GET /status` (seção 6). As fotos são links públicos do Storage
+(seção 4.5).
 
-Há dois tokens, ambos no `C:\ponte\config.json` da máquina da loja:
+Os tokens ficam nos secrets da Edge Function `fdc`, no projeto Supabase `fdc-sonho-real`:
 
-| Token | Uso |
+| Secret | Uso |
 |---|---|
-| `token` | a IA: todas as consultas da seção 4 |
-| `token_admin` | só a equipe: diagnóstico e manutenção (seção 6). **Nunca configure na IA.** |
-
-> **Previsto:** quando o Cloudflare Access for ativado, cada requisição também vai precisar dos
-> headers `CF-Access-Client-Id` e `CF-Access-Client-Secret`. Vale deixar o cliente HTTP preparado
-> para headers extras.
+| `FDC_TOKEN_IA` | a IA: todas as consultas da seção 4 |
+| `FDC_TOKEN_ADMIN` | só a equipe: status detalhado e diagnóstico do ERP (seção 6). **Nunca configure na IA.** |
+| `FDC_TOKEN_WORKER` | só o worker da loja (`C:\worker-fdc\config.json`). Não serve para consultas. |
 
 ---
 
@@ -39,13 +44,14 @@ Toda consulta fica em `/q/{nome}`. Os parâmetros podem ir de dois jeitos, com o
 
 **GET com parâmetros na URL**
 ```bash
-curl "https://sonhoreal-erp.scaleia.ai/q/buscar_produto?busca=colchao%20casal" \
+BASE=https://mnhtuzsmwacvsymtbyck.supabase.co/functions/v1/fdc
+curl "$BASE/q/buscar_produto?busca=colchao%20casal" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 **POST com parâmetros no body**
 ```bash
-curl -X POST "https://sonhoreal-erp.scaleia.ai/q/buscar_produto" \
+curl -X POST "$BASE/q/buscar_produto" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"busca": "colchao casal"}'
@@ -63,10 +69,10 @@ curl -X POST "https://sonhoreal-erp.scaleia.ai/q/buscar_produto" \
 
 Nó **HTTP Request**:
 - **Method:** `POST`
-- **URL:** `https://sonhoreal-erp.scaleia.ai/q/{{ $json.consulta }}`, ou fixa por consulta
+- **URL:** `https://mnhtuzsmwacvsymtbyck.supabase.co/functions/v1/fdc/q/{{ $json.consulta }}`, ou fixa por consulta
 - **Authentication:** Generic Credential Type → **Header Auth**
   - Name: `Authorization`
-  - Value: `Bearer <TOKEN>`
+  - Value: `Bearer <FDC_TOKEN_IA>`
 - **Send Body:** JSON → os parâmetros da consulta
 - **Settings → Never Error:** ligado, para tratar 4xx/5xx no fluxo (seção 3)
 
@@ -81,7 +87,8 @@ Nó **HTTP Request**:
   "consulta": "buscar_produto",
   "total": 2,
   "truncado": false,
-  "ms": 632,
+  "ms": 41,
+  "atualizado_em": "2026-10-27T13:05:12.418Z",
   "linhas": [
     { "codigo": 14386, "descricao": "COLCHAO CASAL GAZIN DREAM D45 138X20 PTO", "preco_avista": 1199, "...": "..." },
     { "codigo": 13430, "descricao": "COLCHAO CASAL GAZIN NEW YORK 138X26 PTO", "preco_avista": 1100, "...": "..." }
@@ -94,10 +101,16 @@ Nó **HTTP Request**:
 | `linhas` | resultado. **Lista vazia não é erro**: quer dizer que não achou nada. |
 | `total` | quantidade de linhas devolvidas |
 | `truncado` | `true` se havia mais linhas que o limite da consulta |
-| `ms` | tempo da consulta no banco |
+| `ms` | tempo da consulta no Supabase |
+| `atualizado_em` | quando a cópia mais antiga usada por esta consulta foi atualizada pelo worker (UTC). `null` = ainda não houve a primeira cópia. |
+
+**Dados desatualizados.** Se `atualizado_em` tiver mais de **2 horas** (o PC da loja está
+desligado ou sem internet), a IA deve continuar respondendo, mas avisar que preço e estoque
+precisam ser confirmados com a loja. Para dívida e boleto, deve orientar o cliente a confirmar
+o valor com a loja (um pagamento recente pode ainda não ter chegado na cópia).
 
 **Convenções dos valores**
-- Datas: `"AAAA-MM-DD"`. Data e hora: `"AAAA-MM-DD HH:MM:SS"`.
+- Datas: `"AAAA-MM-DD"`. Data e hora: ISO 8601 em UTC.
 - Valores em reais: número com ponto decimal (`1199.9`), sem formatação.
 - Sim/não: `"S"` / `"N"`.
 - Campo sem informação no ERP: `null`.
@@ -111,17 +124,18 @@ Todo erro tem o formato `{"erro": "mensagem"}`.
 |---|---|---|
 | 400 | parâmetro obrigatório faltando ou inválido (CPF com tamanho errado, número inválido) | pedir o dado de novo ao cliente |
 | 401 | token errado ou ausente | erro de configuração: alertar a equipe |
-| 403 | consulta exige `token_admin` | não usar essa consulta |
+| 403 | token sem permissão para a rota (ex.: token do worker em `/q`) | erro de configuração: alertar a equipe |
 | 404 | consulta não existe | conferir o nome |
-| 503 | banco do ERP fora do ar, PC da loja desligado ou API ocupada | "nosso sistema está fora agora, um atendente vai te responder" e transferir |
-| 504 | consulta passou de 15 segundos | tentar uma vez de novo; se repetir, tratar como 503 |
-| 502 / 530 | erro da Cloudflare: a máquina da loja não responde | tratar como 503 |
+| 500 / 503 | erro ou indisponibilidade do Supabase | "nosso sistema está fora agora, um atendente vai te responder" e transferir |
+
+Com o PC da loja desligado, as consultas **não dão erro**: respondem com a última cópia
+(veja `atualizado_em`).
 
 ### Limites
 
-- Até **4 consultas simultâneas**; acima disso, a fila espera até o timeout.
-- **Timeout de 15 s** por consulta.
 - Cada consulta tem um teto de linhas (indicado em cada uma).
+- As consultas são rápidas (dezenas de ms). Não há fila nem limite de chamadas simultâneas
+  além dos limites do plano do Supabase.
 
 ---
 
@@ -177,7 +191,7 @@ Campos: os mesmos de `buscar_produto`, mais:
 
 | Campo | |
 |---|---|
-| `ativo` | `N` = produto fora de linha: não ofereça |
+| `ativo` | `N` = produto fora de linha: não ofereça. Nenhuma linha = produto não existe ou foi desativado. |
 | `subgrupo`, `referencia`, `ean` | |
 | `promocao_ate` | fim da promoção |
 | `altura`, `largura`, `comprimento` | medidas cadastradas |
@@ -344,7 +358,7 @@ Até 36 linhas, da mais antiga para a mais nova.
 |---|---|---|
 | `documento` | sim | `12345678909` |
 
-Últimas 10 compras não canceladas.
+Últimas 10 compras não canceladas, dos últimos 24 meses.
 
 | Campo | |
 |---|---|
@@ -363,22 +377,22 @@ Campos: `filial`, `nome`, `endereco`, `numero`, `bairro`, `cidade`, `uf`, `cep`,
 
 ### 4.5 Fotos dos produtos
 
-`GET /foto/{codigo}/{seq}.jpg` devolve a imagem direto: JPEG ou PNG, não JSON.
+As fotos ficam no Storage do Supabase (bucket `fotos`, público). O link é a própria imagem
+(JPEG ou PNG, não JSON), **sem token**, porque o WhatsApp precisa baixar pela URL.
 
-- **Sem token.** O WhatsApp precisa baixar a imagem por URL, e foto de catálogo é pública.
 - Você não precisa montar a URL: ela vem pronta em `foto_url` (`buscar_produto`,
   `detalhe_produto`) e em `fotos_produto`.
-- Foto acima de 1 MB é reduzida para no máximo 1600 px e regravada em JPEG, dentro do limite de
-  imagem do WhatsApp.
-- Só serve foto de produto ativo. Foto inexistente: **404**.
-- A Cloudflare guarda a imagem por 24 h, então o PC da loja só é consultado na primeira vez.
+- Foto acima de 1 MB é reduzida pelo worker para no máximo 1600 px, dentro do limite de imagem
+  do WhatsApp.
+- Quando a foto muda no ERP, o link muda junto (o nome do arquivo leva um hash). Não guarde
+  links por muito tempo: peça de novo à consulta.
 
 Para enviar no WhatsApp (Cloud API da Meta), use a URL como `link` da mensagem de imagem:
 ```json
-{ "type": "image", "image": { "link": "https://sonhoreal-erp.scaleia.ai/foto/14818/1.jpg", "caption": "Guarda-roupa Milano 6 portas – R$ 999,00" } }
+{ "type": "image", "image": { "link": "https://mnhtuzsmwacvsymtbyck.supabase.co/storage/v1/object/public/fotos/14818/1-3f9a0c1b2d4e.jpg", "caption": "Guarda-roupa Milano 6 portas – R$ 999,00" } }
 ```
 
-Hoje 1.801 dos 1.913 produtos ativos (94%) têm foto.
+Em 26/10/2026, 1.801 dos 1.913 produtos ativos (94%) tinham foto.
 
 ---
 
@@ -398,7 +412,10 @@ Hoje 1.801 dos 1.913 produtos ativos (94%) têm foto.
 2. Pergunta sobre dívida, boleto ou compra: pedir o CPF, depois `cliente_por_documento`.
 3. Em seguida, `parcelas_em_aberto` e/ou `compras_cliente`.
 
-**Sistema fora (503/502/530)**
+**Cópia antiga (`atualizado_em` com mais de 2 h)**
+- Responder normalmente, mas dizer que preço, estoque e valores devem ser confirmados com a loja.
+
+**Supabase fora (500/503)**
 - Não inventar preço nem estoque. Avisar que o sistema está indisponível e transferir para um
   atendente.
 
@@ -406,19 +423,22 @@ Hoje 1.801 dos 1.913 produtos ativos (94%) têm foto.
 
 ## 6. Monitoramento e administração
 
-### `GET /health` (sem token)
+### `GET /status` (sem token)
 
 ```json
-{ "ok": true, "versao": "dev", "cliente": "sonho-real", "banco_ok": true, "banco_ms": 2,
-  "consultas": 22, "consultas_sha": "c616fb...", "no_ar_desde": "2026-10-26T16:52:29-03:00" }
+{ "ok": true, "worker_visto_em": "2026-10-27T13:06:01.112Z", "worker_versao": "v2.0.0", "banco_erp_ok": true }
 ```
 
-- HTTP **200** = API e banco ok. HTTP **503** = API no ar, mas banco fora.
-- Erro de rede, 502 ou 530 = máquina da loja ou API fora do ar.
-- `no_ar_desde` mudou = a API reiniciou (reboot do PC, por exemplo).
+- HTTP **200** = o worker da loja deu sinal nos últimos 10 minutos.
+- HTTP **503** = o worker sumiu (PC desligado, sem internet ou serviço parado). A IA continua
+  funcionando com a cópia; é a equipe que precisa saber.
+- `banco_erp_ok: false` = o worker está no ar, mas não alcança o Firebird.
 
-Sugestão: monitorar a cada 5 minutos (UptimeRobot, ou um fluxo no n8n) e alertar no WhatsApp da
-equipe depois de 2 falhas seguidas.
+Com `FDC_TOKEN_IA` ou `FDC_TOKEN_ADMIN`, o `/status` também traz `tabelas` (quando cada tabela foi
+copiada e quantas linhas tem) e `erros` (o último erro de cada tabela, se houver).
+
+Sugestão: monitorar `/status` a cada 5 minutos (UptimeRobot, ou um fluxo no n8n) e alertar no
+WhatsApp da equipe depois de 2 falhas seguidas.
 
 ### `GET /q` (token)
 
@@ -426,18 +446,32 @@ Lista todas as consultas disponíveis com descrição, parâmetros, padrões e e
 verdade: se uma consulta mudar ou entrar uma nova, ela aparece aqui sem precisar atualizar este
 documento. Dá para gerar as tools da IA automaticamente a partir dela.
 
-### Só com `token_admin`
+### Diagnóstico do ERP (só `FDC_TOKEN_ADMIN`)
 
-| Endpoint | |
+O Firebird fica na loja e não é acessível de fora. Para rodar um diagnóstico, faça o pedido no
+Supabase. O worker busca os pedidos a cada 30 s, executa no ERP e grava o resultado:
+
+```bash
+# pede
+curl -X POST "$BASE/admin/comandos" -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"tipo": "consulta", "consulta": "diag_view_colunas", "params": {"nome": "VIEWPRODUTOS"}}'
+# → {"id": "12", ...}
+
+# lê (concluido_em preenchido = pronto)
+curl "$BASE/admin/comandos/12" -H "Authorization: Bearer $ADMIN"
+```
+
+| `consulta` | |
 |---|---|
-| `GET /q/diag_versao` | versão do Firebird e charset |
-| `GET /q/diag_status`, `diag_receber`, `diag_receber_amostra`, `diag_flags`, `diag_estoque` | conferência das regras de negócio |
-| `GET /q/diag_views`, `diag_view_colunas?nome=VIEWPRODUTOS` | código das views do fornecedor do ERP |
-| `GET /q/diag_fotos`, `diag_fotos_amostra` | o que existe de foto no banco |
-| `GET /q/diag_amostra_clientes`, `diag_amostra_produtos`, `diag_indices` | formato dos dados e índices |
-| `GET /q/pedidos_cliente`, `assistencias_cliente` | desligadas para a IA: `PEDIDOVENDA` e `ASSISTENCIA` estão vazias neste ERP |
-| `POST /admin/sql` | SQL livre (só `SELECT`), só se `sql_livre` estiver ligado no config |
-| `POST /admin/atualizar` | pede atualização imediata (quando a auto-atualização estiver ligada) |
+| `diag_versao` | versão do Firebird e charset |
+| `diag_status`, `diag_receber`, `diag_receber_amostra`, `diag_flags`, `diag_estoque` | conferência das regras de negócio |
+| `diag_views`, `diag_view_colunas` (`params.nome`) | código das views do fornecedor do ERP |
+| `diag_fotos`, `diag_fotos_amostra` | o que existe de foto no banco |
+| `diag_amostra_clientes`, `diag_amostra_produtos`, `diag_indices` | formato dos dados e índices |
+| `pedidos_cliente`, `assistencias_cliente` (`params.documento`) | `PEDIDOVENDA` e `ASSISTENCIA` estão vazias neste ERP, por isso não são copiadas |
+
+`{"tipo": "atualizar"}` faz o worker buscar uma versão nova na hora, sem esperar os 5 minutos.
+Não existe SQL livre: só as consultas do `queries.yaml`.
 
 ---
 
@@ -461,18 +495,28 @@ Uma tool por consulta, com a descrição tirada do `GET /q`:
 ```
 
 A execução da tool é sempre a mesma: `POST /q/{name}` com os argumentos no body e o header
-`Authorization`. A resposta inteira (`linhas`) volta para a IA como resultado.
+`Authorization`. A resposta (`linhas` e `atualizado_em`) volta para a IA como resultado.
 
 ---
 
-## 8. Limitações conhecidas
+## 8. Atraso da cópia e limitações
+
+Quanto tempo uma mudança no ERP leva para aparecer para a IA (com o PC da loja ligado):
+
+| Dado | Até |
+|---|---|
+| estoque | 5 min |
+| produtos, preços, promoções, parcelas em aberto | 10 min |
+| clientes, compras, condições de pagamento | 30 min |
+| fotos, lojas | 60 min |
 
 | Ponto | Situação |
 |---|---|
-| Dados | hoje a API lê uma **cópia de backup** do banco (23/10/2026) no PC da Leila. Preço, estoque e títulos não refletem o dia até ela apontar para o servidor real. |
-| Estoque | lido de `ESTOQUE.QTDER`, a mesma coluna da `VIEWESTOQUE` do fornecedor (corrigido em 26/10: antes vinha tudo zerado). |
-| Cloudflare Access | quando for ativado, `/foto/*` precisa de uma regra **Bypass**, senão o WhatsApp não consegue baixar as imagens. |
+| Dados | hoje o worker lê uma **cópia de backup** do banco (23/10/2026) no PC da Leila. Preço, estoque e títulos não refletem o dia até ele apontar para o servidor real. |
+| Pagamento recente | um título pago some da cópia em até 10 min. Até lá, ainda aparece como em aberto. |
+| Produto desativado | some da cópia: `detalhe_produto` volta sem linhas. |
+| Compras | só as dos últimos 24 meses. |
+| Estoque | lido de `ESTOQUE.QTDER`, a mesma coluna da `VIEWESTOQUE` do fornecedor. |
 | Parcelamento | o ERP marca 3x–8x e 10x–12x como inativas. Confirmar com a loja antes de confiar na simulação. |
 | Juros de atraso | não calculados (`parcelas_em_aberto` mostra o valor original). |
 | Títulos com status `A` | 15 títulos com significado ainda não confirmado. Hoje não aparecem como dívida. |
-| Disponibilidade | a API depende do PC da loja ligado. Ela volta sozinha uns 3 minutos depois de um reinício. |

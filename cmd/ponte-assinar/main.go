@@ -5,7 +5,7 @@
 //	    PUBLICA vai no config.json de cada cliente (atualizacao.chave_publica).
 //
 //	PONTE_CHAVE_PRIVADA=... ponte-assinar manifesto -cliente sonho-real \
-//	    -api dist/ponte-api.exe -api-url ../bin/ponte-api-v1.2.0.exe -api-versao v1.2.0 \
+//	    -api dist/worker-fdc.exe -api-url ../../bin/worker-fdc-v1.2.0.exe -api-versao v1.2.0 \
 //	    -consultas queries.yaml -consultas-url consultas-<sha>.yaml -saida dist/manifest.json
 //	    grava manifest.json e manifest.json.sig
 //
@@ -51,7 +51,7 @@ func main() {
 func manifesto(args []string) {
 	fs := flag.NewFlagSet("manifesto", flag.ExitOnError)
 	cliente := fs.String("cliente", "", "nome do cliente (igual ao config.json)")
-	apiExe := fs.String("api", "", "caminho do ponte-api.exe compilado")
+	apiExe := fs.String("api", "", "caminho do worker-fdc.exe compilado")
 	apiURL := fs.String("api-url", "", "URL do .exe, relativa ao manifesto ou absoluta")
 	apiVersao := fs.String("api-versao", "", "versão gravada no .exe (-X ponte/internal/versao.Versao)")
 	consultas := fs.String("consultas", "", "caminho do queries.yaml")

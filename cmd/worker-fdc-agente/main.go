@@ -1,8 +1,8 @@
-// ponte-agente: serviço do Windows que mantém o ponte-api.exe no ar e o atualiza sozinho.
+// worker-fdc-agente: serviço do Windows que mantém o worker-fdc.exe no ar e o atualiza sozinho.
 //
-//	ponte-agente.exe instalar      registra o serviço "PonteERP" (início automático, reinicia se falhar)
-//	ponte-agente.exe iniciar | parar | reiniciar | status | desinstalar
-//	ponte-agente.exe               roda em primeiro plano (para testar; Ctrl+C encerra)
+//	worker-fdc-agente.exe instalar      registra o serviço "WorkerFDC" (início automático, reinicia se falhar)
+//	worker-fdc-agente.exe iniciar | parar | reiniciar | status | desinstalar
+//	worker-fdc-agente.exe               roda em primeiro plano (para testar; Ctrl+C encerra)
 package main
 
 import (
@@ -39,14 +39,14 @@ func (p *programa) Start(s service.Service) error {
 		saida = io.MultiWriter(os.Stdout, saida)
 	}
 	l := log.New(saida, "", log.LstdFlags)
-	l.Printf("ponte-agente %s iniciando em %s", versao.Versao, p.dir)
+	l.Printf("worker-fdc-agente %s iniciando em %s", versao.Versao, p.dir)
 
 	j, err := novoJob()
 	if err != nil {
 		l.Printf("aviso: job object indisponível: %v", err)
 	}
 	sup := &supervisor{
-		exe:     cfg.Caminho("ponte-api.exe"),
+		exe:     cfg.Caminho("worker-fdc.exe"),
 		args:    []string{"-config", cfgPath},
 		dir:     p.dir,
 		log:     l,
@@ -88,9 +88,9 @@ func main() {
 	}
 	prg := &programa{dir: filepath.Dir(exe)}
 	s, err := service.New(prg, &service.Config{
-		Name:        "PonteERP",
-		DisplayName: "Ponte ERP (Scale IA)",
-		Description: "Mantém a API local de consulta ao ERP no ar e atualizada. Logs em " + filepath.Join(prg.dir, "logs"),
+		Name:        "WorkerFDC",
+		DisplayName: "Worker FDC (Scale IA)",
+		Description: "Mantém o worker que copia o ERP para o Supabase no ar e atualizado. Logs em " + filepath.Join(prg.dir, "logs"),
 		Option: service.KeyValue{
 			"StartType":              "automatic",
 			"DelayedAutoStart":       true, // sobe depois do Firebird no boot
@@ -113,12 +113,12 @@ func main() {
 		if cmd == "status" {
 			st, err := s.Status()
 			nomes := map[service.Status]string{service.StatusRunning: "rodando", service.StatusStopped: "parado"}
-			fmt.Println("PonteERP:", nomes[st], err)
+			fmt.Println("WorkerFDC:", nomes[st], err)
 			return
 		}
 		acao, ok := acoes[cmd]
 		if !ok {
-			fmt.Println("uso: ponte-agente.exe [instalar|desinstalar|iniciar|parar|reiniciar|status]")
+			fmt.Println("uso: worker-fdc-agente.exe [instalar|desinstalar|iniciar|parar|reiniciar|status]")
 			os.Exit(2)
 		}
 		if err := service.Control(s, acao); err != nil {

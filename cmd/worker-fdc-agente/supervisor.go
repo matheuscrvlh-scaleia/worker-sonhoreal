@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// supervisor mantém o ponte-api.exe rodando: se ele cair, sobe de novo
+// supervisor mantém o worker-fdc.exe rodando: se ele cair, sobe de novo
 // (esperando 1s, 2s, 4s... até 30s se ficar caindo em sequência).
 type supervisor struct {
 	exe     string
@@ -50,7 +50,7 @@ func (s *supervisor) rodar(ctx context.Context) {
 		if time.Since(inicio) > time.Minute {
 			espera = time.Second
 		}
-		s.log.Printf("ponte-api fora do ar, tentando de novo em %s", espera)
+		s.log.Printf("worker-fdc fora do ar, tentando de novo em %s", espera)
 		select {
 		case <-ctx.Done():
 		case <-time.After(espera):
@@ -65,29 +65,29 @@ func (s *supervisor) rodar(ctx context.Context) {
 func (s *supervisor) iniciar() (chan struct{}, error) {
 	cmd := exec.Command(s.exe, s.args...)
 	cmd.Dir = s.dir
-	cmd.Stdout = io.Discard // a API já grava o próprio log
-	cmd.Stderr = linhasNoLog{s.log, "[api] "}
+	cmd.Stdout = io.Discard // o worker já grava o próprio log
+	cmd.Stderr = linhasNoLog{s.log, "[worker] "}
 	configurarProcesso(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
 	if err := s.job.anexar(cmd.Process); err != nil {
-		s.log.Printf("aviso: não anexei a API ao job object: %v", err)
+		s.log.Printf("aviso: não anexei o worker ao job object: %v", err)
 	}
 	saiu := make(chan struct{})
 	s.mu.Lock()
 	s.cmd, s.saiu = cmd, saiu
 	s.mu.Unlock()
-	s.log.Printf("ponte-api iniciada (pid %d)", cmd.Process.Pid)
+	s.log.Printf("worker-fdc iniciada (pid %d)", cmd.Process.Pid)
 	go func() {
 		err := cmd.Wait()
-		s.log.Printf("ponte-api encerrou: %v", err)
+		s.log.Printf("worker-fdc encerrou: %v", err)
 		close(saiu)
 	}()
 	return saiu, nil
 }
 
-// pausar derruba a API e não deixa subir de novo até retomar (para trocar o .exe).
+// pausar derruba o worker e não deixa subir de novo até retomar (para trocar o .exe).
 func (s *supervisor) pausar() {
 	s.mu.Lock()
 	s.pausado = true
@@ -122,7 +122,7 @@ func (s *supervisor) matar() {
 	select {
 	case <-saiu:
 	case <-time.After(15 * time.Second):
-		s.log.Printf("ponte-api não encerrou em 15s")
+		s.log.Printf("worker-fdc não encerrou em 15s")
 	}
 }
 
@@ -133,7 +133,7 @@ func dormir(ctx context.Context, d time.Duration) {
 	}
 }
 
-// linhasNoLog joga a saída de erro da API (panics, por exemplo) no log do agente.
+// linhasNoLog joga a saída de erro do worker (panics, por exemplo) no log do agente.
 type linhasNoLog struct {
 	l      *log.Logger
 	prefix string

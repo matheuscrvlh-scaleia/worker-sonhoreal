@@ -10,7 +10,7 @@ import (
 )
 
 // job é um Job Object do Windows com KILL_ON_JOB_CLOSE: se o agente morrer de
-// qualquer jeito, o Windows encerra a API junto. Sem isso uma API órfã poderia
+// qualquer jeito, o Windows encerra o worker junto. Sem isso um worker órfão poderia
 // continuar segurando a porta com a versão antiga.
 type job struct{ h windows.Handle }
 

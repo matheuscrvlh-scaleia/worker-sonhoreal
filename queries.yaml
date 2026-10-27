@@ -1,15 +1,15 @@
-# Consultas que a IA do WhatsApp pode fazer no ERP da Sonho Real (Firebird).
+# O que o worker-fdc copia do ERP da Sonho Real (Firebird) para o Supabase.
 #
-# Cada consulta vira  GET /q/<nome>?param=valor   (ou POST com JSON).
-# GET /q lista todas, com descrição e parâmetros: dá para gerar as tools da IA direto dela.
+#   sincronizar:  cada item é uma tabela fdc.<nome> no Supabase (supabase/migrations). O SQL
+#                 roda inteiro a cada intervalo_minutos; o worker compara o hash de cada linha
+#                 com o que já mandou e envia só o que mudou (e apaga o que sumiu).
+#                 As colunas do SQL têm o mesmo nome das colunas da tabela no Supabase; coluna
+#                 a mais é ignorada lá (serve para a chave). Coluna nova: migração + SQL aqui.
+#   consultas:    diagnósticos. Não vão para a IA: rodam quando a equipe pede pelo Supabase
+#                 (POST /admin/comandos) ou no "worker-fdc.exe -testar".
 #
-# Tipos de parâmetro:
-#   texto, inteiro, numero ("1.500,90" vale), data (AAAA-MM-DD ou DD/MM/AAAA)
-#   documento  -> :x (só dígitos) e :x_formatado (com máscara de CPF/CNPJ)
-#   telefone   -> :x (dígitos, sem o 55) e :x_final8 (últimos 8 dígitos)
-#   palavras   -> :x (texto inteiro) e :x_1 ... :x_N (cada termo; os que sobram ficam '')
-# "fixo: true" = a IA não consegue alterar, vale sempre o padrao.
-# "admin: true" = só com token_admin (diagnóstico ou consulta desligada).
+# As perguntas da IA (buscar_produto, parcelas_em_aberto...) agora são funções fdc.q_* no
+# Supabase e leem a cópia; o catálogo fica em supabase/functions/fdc/consultas.ts.
 #
 # Regras de Firebird seguidas aqui (não remova):
 #   - parâmetro comparado com coluna CHAR/VARCHAR vai com CAST(:x AS VARCHAR(n)),
@@ -19,9 +19,9 @@
 #
 # O que o banco da Sonho Real mostrou (diagnóstico de 26/10/2026, Firebird 3.0.10, charset NONE):
 #   - sim/não é gravado como 'T'/'F' (não 'S'/'N'). Aqui aceitamos os dois:
-#     sim = IN ('S', 'T'), não = NOT IN ('S', 'T');
+#     sim = IN ('S', 'T'), não = NOT IN ('S', 'T'). Para o Supabase vai sempre 'S'/'N';
 #   - RECEBER.VALORPAGO nunca é preenchido: o que diz se o título está pago é o STATUS
-#     (ver "TÍTULOS EM ABERTO" abaixo);
+#     ('0' = em aberto, ver diag_status);
 #   - PEDIDOVENDA, ASSISTENCIA e PRODUTOPROMOCAO estão vazias: a venda é lançada direto em SAIDA;
 #   - CPF gravado só com dígitos; descrições em maiúsculas e sem acento;
 #   - lojas: 01 Bom Jardim/RJ (principal), 02 São José do Calçado/ES; CD, EC, EN são internas.
@@ -33,129 +33,24 @@
 #   - VIEWFATURAMENTO: venda válida = SAIDA.STATUS 'A' e TIPOSAIDA '1', '2' ou '9'; item com
 #     IDPRODUTOREFERENCIA é garantia estendida, não produto.
 #
-# Fotos: PRODUTOFOTO.FOTO (binário). URL pública: https://sonhoreal-erp.scaleia.ai/foto/{codigo}/{seq}.jpg
-#
-# Este arquivo é recarregado sozinho quando muda (sem reiniciar a API).
-# Se o arquivo novo tiver erro, a API continua com o anterior e o /health mostra o erro.
-# Depois de mexer, rode "ponte-api.exe -testar" na máquina do cliente.
+# Este arquivo é relido sozinho quando muda (sem reiniciar o worker). Se o arquivo novo tiver
+# erro, o worker continua com o anterior e o erro aparece no worker_status do Supabase.
+# Depois de mexer, rode "worker-fdc.exe -testar" na máquina do cliente.
 
-consultas:
+sincronizar:
 
   # ============================================================ PRODUTOS
 
-  buscar_produto:
-    descricao: >
-      "Quanto custa X?" / "Vocês têm X?". Procura produtos ativos e com preço pelo nome (termos
-      em qualquer ordem, procurando também na marca/fabricante e no grupo), pelo código interno,
-      pelo EAN ou pela referência de fábrica. Devolve preço à vista, a prazo, o promocional (se
-      houver promoção vigente), o estoque na loja, o estoque somado de todas as lojas e do
-      depósito, e o link da foto principal (foto_url, null se não houver).
-      Mande termos curtos e no singular: "colchao casal", "guarda roupa 6 portas", "moto g06".
-      estoque_loja > 0 = pronta entrega na loja; só estoque_total > 0 = tem no depósito/outra loja.
-    max_linhas: 15
-    params:
-      - nome: busca
-        tipo: palavras
-        obrigatorio: true
-        descricao: termos do produto, código, EAN ou referência
-        exemplo: colchao casal
-      - nome: filial
-        tipo: texto
-        padrao: "01"
-        descricao: código da loja (consulta lojas). Sem informar, usa a loja de Bom Jardim.
-        exemplo: "01"
-    sql: |
-      SELECT
-        p.IDPRODUTO        AS codigo,
-        p.DESCRICAOPRODUTO AS descricao,
-        COALESCE(m.NOMEMARCA, fa.NOMEFABRICANTE) AS marca,
-        g.NOMEGRUPO        AS grupo,
-        p.UNIDADEMEDIDA    AS unidade,
-        p.PRECOAVISTA      AS preco_avista,
-        p.PRECOAPRAZO      AS preco_aprazo,
-        COALESCE(
-          (SELECT FIRST 1 pp.PRECOAVISTA FROM PRODUTOPROMOCAO pp
-            WHERE pp.IDPRODUTO = p.IDPRODUTO AND pp.IDFILIAL = CAST(:filial AS VARCHAR(10))
-              AND CURRENT_DATE BETWEEN CAST(pp.DATAINI AS DATE) AND CAST(pp.DATAFIM AS DATE)
-              AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
-            ORDER BY pp.DATAINI DESC),
-          CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
-                AND CURRENT_DATE BETWEEN COALESCE(CAST(p.DATAINICIOPROMOCAO AS DATE), CURRENT_DATE)
-                                     AND COALESCE(CAST(p.DATAFIMPROMOCAO AS DATE), CURRENT_DATE)
-               THEN p.PRECOPROMOCAO END
-        )                  AS preco_promocional,
-        t.estoque_loja,
-        t.estoque_total,
-        (SELECT FIRST 1 'https://sonhoreal-erp.scaleia.ai/foto/' || CAST(pf.IDPRODUTO AS VARCHAR(10))
-                        || '/' || CAST(pf.SEQ AS VARCHAR(10)) || '.jpg'
-           FROM PRODUTOFOTO pf
-          WHERE pf.IDPRODUTO = p.IDPRODUTO AND pf.FOTO IS NOT NULL
-          ORDER BY pf.SEQ) AS foto_url
-      FROM (
-        -- Escolhe os 15 primeiros só com o necessário para filtrar e ordenar;
-        -- preço promocional, marca e grupo são buscados depois, só para esses 15.
-        SELECT FIRST 15
-          b.id,
-          CASE WHEN e.QTDER > 0 THEN 0 ELSE 1 END AS sem_estoque_loja,
-          CASE WHEN e.QTDER > 0 THEN e.QTDER ELSE 0 END AS estoque_loja,
-          (SELECT COALESCE(SUM(e2.QTDER), 0) FROM ESTOQUE e2
-            WHERE e2.IDPRODUTO = b.id AND e2.QTDER > 0) AS estoque_total,
-          CASE WHEN b.descricao CONTAINING :busca_1 THEN 0 ELSE 1 END AS so_no_grupo,
-          b.descricao
-        FROM (
-          -- "texto": descrição + marca + fabricante + grupo em maiúsculas e sem acento.
-          SELECT
-            p0.IDPRODUTO AS id, p0.DESCRICAOPRODUTO AS descricao,
-            p0.EAN AS ean, p0.REFERENCIAFABRICA AS referencia,
-            REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
-              UPPER(p0.DESCRICAOPRODUTO || ' ' || COALESCE(m0.NOMEMARCA, '') || ' ' || COALESCE(fa0.NOMEFABRICANTE, '')
-                    || ' ' || COALESCE(g0.NOMEGRUPO, '')),
-              'Á', 'A'), 'À', 'A'), 'Â', 'A'), 'Ã', 'A'), 'É', 'E'), 'Ê', 'E'), 'Í', 'I'),
-              'Ó', 'O'), 'Ô', 'O'), 'Õ', 'O'), 'Ú', 'U'), 'Ü', 'U'), 'Ç', 'C') AS texto
-          FROM PRODUTO p0
-          LEFT JOIN PRODUTOMARCA m0 ON m0.IDMARCA = p0.IDMARCA
-          LEFT JOIN FABRICANTE fa0  ON fa0.IDFABRICANTE = p0.IDFABRICANTE
-          LEFT JOIN GRUPO g0        ON g0.IDGRUPO = p0.IDGRUPO
-          WHERE COALESCE(p0.ATIVO, 'T') IN ('S', 'T')
-            AND COALESCE(p0.FORADELINHA, 'F') NOT IN ('S', 'T')
-            AND p0.PRECOAVISTA > 0
-        ) b
-        LEFT JOIN ESTOQUE e ON e.IDPRODUTO = b.id AND e.IDFILIAL = CAST(:filial AS VARCHAR(10))
-        WHERE (    b.texto CONTAINING :busca_1
-               AND b.texto CONTAINING :busca_2
-               AND b.texto CONTAINING :busca_3
-               AND b.texto CONTAINING :busca_4)
-           OR CAST(b.id AS VARCHAR(20)) = CAST(:busca AS VARCHAR(300))
-           OR b.ean = CAST(:busca AS VARCHAR(300))
-           OR b.referencia = CAST(:busca AS VARCHAR(300))
-        ORDER BY 2, 4 DESC, 5, 6
-      ) t
-      JOIN PRODUTO p           ON p.IDPRODUTO = t.id
-      LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
-      LEFT JOIN FABRICANTE fa  ON fa.IDFABRICANTE = p.IDFABRICANTE
-      LEFT JOIN GRUPO g        ON g.IDGRUPO = p.IDGRUPO
-      ORDER BY t.sem_estoque_loja, t.estoque_total DESC, t.so_no_grupo, t.descricao
-
-  detalhe_produto:
-    descricao: >
-      Ficha completa de UM produto (use o codigo que veio do buscar_produto): preços, promoção
-      com validade, estoque, medidas, garantia, descrição do site, dados técnicos, se tem montagem
-      e frete grátis, se aceita desconto, a foto principal (foto_url) e quantas fotos existem
-      (fotos; para todas, use fotos_produto). ativo = N: produto fora de linha, não ofereça.
-    params:
-      - nome: codigo
-        tipo: inteiro
-        obrigatorio: true
-        exemplo: "1"
-      - nome: filial
-        tipo: texto
-        padrao: "01"
-        exemplo: "01"
+  # Só ativos. A vigência da promoção é conferida no Supabase (fdc.hoje()), para uma promoção
+  # que acabou não continuar valendo se o PC da loja ficar desligado.
+  produto:
+    chave: [codigo]
+    intervalo_minutos: 10
     sql: |
       SELECT
         p.IDPRODUTO         AS codigo,
         p.DESCRICAOPRODUTO  AS descricao,
-        CASE WHEN COALESCE(p.ATIVO, 'T') IN ('S', 'T') THEN 'S' ELSE 'N' END AS ativo,
+        CASE WHEN p.FORADELINHA IN ('S', 'T') THEN 'S' ELSE 'N' END AS fora_de_linha,
         COALESCE(m.NOMEMARCA, fa.NOMEFABRICANTE) AS marca,
         g.NOMEGRUPO         AS grupo,
         sg.NOMESUBGRUPO     AS subgrupo,
@@ -164,17 +59,9 @@ consultas:
         p.UNIDADEMEDIDA     AS unidade,
         p.PRECOAVISTA       AS preco_avista,
         p.PRECOAPRAZO       AS preco_aprazo,
-        COALESCE(pp.PRECOAVISTA,
-          CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
-                AND CURRENT_DATE BETWEEN COALESCE(CAST(p.DATAINICIOPROMOCAO AS DATE), CURRENT_DATE)
-                                     AND COALESCE(CAST(p.DATAFIMPROMOCAO AS DATE), CURRENT_DATE)
-               THEN p.PRECOPROMOCAO END) AS preco_promocional,
-        COALESCE(CAST(pp.DATAFIM AS DATE),
-          CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
-               THEN CAST(p.DATAFIMPROMOCAO AS DATE) END) AS promocao_ate,
-        CASE WHEN e.QTDER > 0 THEN e.QTDER ELSE 0 END AS estoque_loja,
-        (SELECT COALESCE(SUM(e2.QTDER), 0) FROM ESTOQUE e2
-          WHERE e2.IDPRODUTO = p.IDPRODUTO AND e2.QTDER > 0) AS estoque_total,
+        CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0 THEN p.PRECOPROMOCAO END AS promocao_preco,
+        CAST(p.DATAINICIOPROMOCAO AS DATE) AS promocao_inicio,
+        CAST(p.DATAFIMPROMOCAO AS DATE)    AS promocao_fim,
         p.ALTURA            AS altura,
         p.LARGURA           AS largura,
         p.COMPRIMENTO       AS comprimento,
@@ -187,159 +74,65 @@ consultas:
         CASE WHEN w.MONTAGEMGRATIS IN ('S', 'T') THEN 'S' ELSE 'N' END AS montagem_gratis,
         CASE WHEN w.FRETEGRATIS IN ('S', 'T') THEN 'S' ELSE 'N' END    AS frete_gratis,
         CASE WHEN p.NAOTEMDESCONTO IN ('S', 'T') THEN 'N' ELSE 'S' END AS aceita_desconto,
-        (SELECT FIRST 1 'https://sonhoreal-erp.scaleia.ai/foto/' || CAST(pf.IDPRODUTO AS VARCHAR(10))
-                        || '/' || CAST(pf.SEQ AS VARCHAR(10)) || '.jpg'
-           FROM PRODUTOFOTO pf
-          WHERE pf.IDPRODUTO = p.IDPRODUTO AND pf.FOTO IS NOT NULL
-          ORDER BY pf.SEQ) AS foto_url,
-        (SELECT COUNT(*) FROM PRODUTOFOTO pf
-          WHERE pf.IDPRODUTO = p.IDPRODUTO AND pf.FOTO IS NOT NULL) AS fotos
+        CASE WHEN p.NAOTEMDESCONTO IN ('S', 'T') OR g.PROIBIRDESCONTO IN ('S', 'T')
+             THEN 'S' ELSE 'N' END AS sem_desconto,
+        g.PERCDESCONTO      AS desconto_grupo
       FROM PRODUTO p
       LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
       LEFT JOIN FABRICANTE fa  ON fa.IDFABRICANTE = p.IDFABRICANTE
       LEFT JOIN GRUPO g        ON g.IDGRUPO = p.IDGRUPO
       LEFT JOIN SUBGRUPO sg    ON sg.IDSUBGRUPO = p.IDSUBGRUPO
       LEFT JOIN PRODUTOWEB w   ON w.IDPRODUTO = p.IDPRODUTO
-      LEFT JOIN ESTOQUE e      ON e.IDPRODUTO = p.IDPRODUTO AND e.IDFILIAL = CAST(:filial AS VARCHAR(10))
-      LEFT JOIN PRODUTOPROMOCAO pp ON pp.IDPRODUTO = p.IDPRODUTO AND pp.IDFILIAL = CAST(:filial AS VARCHAR(10))
-            AND CURRENT_DATE BETWEEN CAST(pp.DATAINI AS DATE) AND CAST(pp.DATAFIM AS DATE)
-            AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
-      WHERE p.IDPRODUTO = :codigo
+      WHERE COALESCE(p.ATIVO, 'T') IN ('S', 'T')
 
-  fotos_produto:
-    descricao: >
-      "Tem mais fotos?" Links de todas as fotos de UM produto, na ordem do cadastro. Cada url
-      abre a imagem direto (JPEG/PNG), pronta para enviar no WhatsApp.
-    max_linhas: 20
-    params:
-      - nome: codigo
-        tipo: inteiro
-        obrigatorio: true
-        exemplo: "1"
+  # Só saldos > 0 de produtos ativos. Saldo que zera some do Supabase.
+  estoque:
+    chave: [codigo, filial]
+    intervalo_minutos: 5
     sql: |
-      SELECT
-        pf.SEQ AS seq,
-        'https://sonhoreal-erp.scaleia.ai/foto/' || CAST(pf.IDPRODUTO AS VARCHAR(10))
-          || '/' || CAST(pf.SEQ AS VARCHAR(10)) || '.jpg' AS url
-      FROM PRODUTOFOTO pf
-      JOIN PRODUTO p ON p.IDPRODUTO = pf.IDPRODUTO
-      WHERE pf.IDPRODUTO = :codigo AND pf.FOTO IS NOT NULL
-        AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
-      ORDER BY pf.SEQ
-
-  # Servida pela rota pública /foto/{codigo}/{seq}.jpg (não é chamada via /q).
-  # Só devolve foto de produto ativo.
-  foto_produto:
-    resposta: imagem
-    descricao: Foto de um produto (binário).
-    params:
-      - nome: codigo
-        tipo: inteiro
-        obrigatorio: true
-        exemplo: "1"
-      - nome: seq
-        tipo: inteiro
-        obrigatorio: true
-        exemplo: "1"
-    sql: |
-      SELECT pf.FOTO
-      FROM PRODUTOFOTO pf
-      JOIN PRODUTO p ON p.IDPRODUTO = pf.IDPRODUTO
-      WHERE pf.IDPRODUTO = :codigo AND pf.SEQ = :seq
-        AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
-
-  estoque_por_loja:
-    descricao: >
-      Em quais lojas (e no depósito) tem o produto e quantas unidades em cada uma. Use quando
-      não tiver na loja do cliente, para oferecer outra loja ou entrega a partir do depósito.
-    params:
-      - nome: codigo
-        tipo: inteiro
-        obrigatorio: true
-        exemplo: "1"
-    sql: |
-      SELECT
-        f.IDFILIAL AS filial,
-        COALESCE(f.NOMEFANTASIA, f.NOMEFILIAL) AS loja,
-        f.CIDADE   AS cidade,
-        e.QTDER  AS estoque
+      SELECT e.IDPRODUTO AS codigo, e.IDFILIAL AS filial, e.QTDER AS estoque
       FROM ESTOQUE e
-      JOIN FILIAL f ON f.IDFILIAL = e.IDFILIAL
-      WHERE e.IDPRODUTO = :codigo AND e.QTDER > 0
-      ORDER BY e.QTDER DESC
+      JOIN PRODUTO p ON p.IDPRODUTO = e.IDPRODUTO
+      WHERE e.QTDER > 0 AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
 
-  promocoes_vigentes:
-    descricao: >
-      "Tem alguma promoção?" Produtos em promoção hoje, do maior desconto para o menor.
-      Opcionalmente filtra por termos ("colchao").
-    max_linhas: 30
-    params:
-      - nome: filial
-        tipo: texto
-        padrao: "01"
-        exemplo: "01"
-      - nome: busca
-        tipo: palavras
-        max_palavras: 3
-        descricao: opcional, termos para filtrar
-        exemplo: ""
+  # Promoções por loja que ainda não acabaram. dataini/datafim (com hora) só entram na chave.
+  promocao:
+    chave: [codigo, filial, dataini, datafim]
+    intervalo_minutos: 10
     sql: |
-      SELECT FIRST 30 * FROM (
-        SELECT
-          p.IDPRODUTO        AS codigo,
-          p.DESCRICAOPRODUTO AS descricao,
-          COALESCE(m.NOMEMARCA, fa.NOMEFABRICANTE) AS marca,
-          p.PRECOAVISTA      AS preco_normal,
-          pp.PRECOAVISTA     AS preco_promocional,
-          CAST(pp.DATAFIM AS DATE) AS valida_ate,
-          CASE WHEN e.QTDER > 0 THEN e.QTDER ELSE 0 END AS estoque_loja,
-          ROUND((p.PRECOAVISTA - pp.PRECOAVISTA) * 100 / NULLIF(p.PRECOAVISTA, 0), 1) AS desconto_perc
-        FROM PRODUTOPROMOCAO pp
-        JOIN PRODUTO p           ON p.IDPRODUTO = pp.IDPRODUTO
-        LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
-        LEFT JOIN FABRICANTE fa  ON fa.IDFABRICANTE = p.IDFABRICANTE
-        LEFT JOIN ESTOQUE e      ON e.IDPRODUTO = p.IDPRODUTO AND e.IDFILIAL = pp.IDFILIAL
-        WHERE pp.IDFILIAL = CAST(:filial AS VARCHAR(10))
-          AND CURRENT_DATE BETWEEN CAST(pp.DATAINI AS DATE) AND CAST(pp.DATAFIM AS DATE)
-          AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
-          AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
-          AND p.DESCRICAOPRODUTO CONTAINING :busca_1
-          AND p.DESCRICAOPRODUTO CONTAINING :busca_2
-          AND p.DESCRICAOPRODUTO CONTAINING :busca_3
-        UNION ALL
-        SELECT
-          p.IDPRODUTO, p.DESCRICAOPRODUTO, COALESCE(m.NOMEMARCA, fa.NOMEFABRICANTE), p.PRECOAVISTA, p.PRECOPROMOCAO,
-          CAST(p.DATAFIMPROMOCAO AS DATE),
-          CASE WHEN e.QTDER > 0 THEN e.QTDER ELSE 0 END,
-          ROUND((p.PRECOAVISTA - p.PRECOPROMOCAO) * 100 / NULLIF(p.PRECOAVISTA, 0), 1)
-        FROM PRODUTO p
-        LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
-        LEFT JOIN FABRICANTE fa  ON fa.IDFABRICANTE = p.IDFABRICANTE
-        LEFT JOIN ESTOQUE e      ON e.IDPRODUTO = p.IDPRODUTO AND e.IDFILIAL = CAST(:filial AS VARCHAR(10))
-        WHERE p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
-          AND CURRENT_DATE BETWEEN COALESCE(CAST(p.DATAINICIOPROMOCAO AS DATE), CURRENT_DATE)
-                               AND COALESCE(CAST(p.DATAFIMPROMOCAO AS DATE), CURRENT_DATE)
-          AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
-          AND NOT EXISTS (SELECT 1 FROM PRODUTOPROMOCAO pp2
-                           WHERE pp2.IDPRODUTO = p.IDPRODUTO AND pp2.IDFILIAL = CAST(:filial AS VARCHAR(10))
-                             AND CURRENT_DATE BETWEEN CAST(pp2.DATAINI AS DATE) AND CAST(pp2.DATAFIM AS DATE))
-          AND p.DESCRICAOPRODUTO CONTAINING :busca_1
-          AND p.DESCRICAOPRODUTO CONTAINING :busca_2
-          AND p.DESCRICAOPRODUTO CONTAINING :busca_3
-      ) x
-      ORDER BY x.desconto_perc DESC NULLS LAST
+      SELECT
+        pp.IDPRODUTO AS codigo,
+        pp.IDFILIAL  AS filial,
+        pp.DATAINI   AS dataini,
+        pp.DATAFIM   AS datafim,
+        CAST(pp.DATAINI AS DATE) AS inicio,
+        CAST(pp.DATAFIM AS DATE) AS fim,
+        pp.PRECOAVISTA AS preco
+      FROM PRODUTOPROMOCAO pp
+      WHERE CAST(pp.DATAFIM AS DATE) >= CURRENT_DATE
+        AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
 
-  # ============================================================ PAGAMENTO E NEGOCIAÇÃO
+  # Cada linha é uma foto: o worker lê o binário com sql_arquivo, reduz se passar de 1 MB e
+  # sobe para o Storage (bucket "fotos"). Tamanho e DA (data de alteração) mudam o hash, e
+  # assim a foto trocada no ERP é reenviada.
+  foto:
+    tipo: foto
+    chave: [codigo, seq]
+    intervalo_minutos: 60
+    sql: |
+      SELECT pf.IDPRODUTO AS codigo, pf.SEQ AS seq, OCTET_LENGTH(pf.FOTO) AS bytes_erp, pf.DA AS da
+      FROM PRODUTOFOTO pf
+      JOIN PRODUTO p ON p.IDPRODUTO = pf.IDPRODUTO
+      WHERE pf.FOTO IS NOT NULL AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
+    sql_arquivo: |
+      SELECT pf.FOTO FROM PRODUTOFOTO pf WHERE pf.IDPRODUTO = :codigo AND pf.SEQ = :seq
 
-  condicoes_pagamento:
-    descricao: >
-      "Parcela em quantas vezes?" Condições de pagamento ativas: número de parcelas, se tem
-      entrada, fator de acréscimo (1 = sem juros), parcela mínima e validade.
-    params:
-      - nome: filial
-        tipo: texto
-        padrao: "01"
-        exemplo: "01"
+  # ============================================================ PAGAMENTO
+
+  # Ativas, sem renegociação e sem exclusivas de cliente; a validade é conferida no Supabase.
+  condicao:
+    chave: [codigo]
+    intervalo_minutos: 30
     sql: |
       SELECT
         c.IDCONDPGVENDA        AS codigo,
@@ -350,193 +143,66 @@ consultas:
                         + CASE WHEN c.DIAS5 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS6 IS NOT NULL THEN 1 ELSE 0 END
                         + CASE WHEN c.DIAS7 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS8 IS NOT NULL THEN 1 ELSE 0 END
                         + CASE WHEN c.DIAS9 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS10 IS NOT NULL THEN 1 ELSE 0 END, 0),
-                 1)                                         AS parcelas,
+                 1) AS parcelas,
         CASE WHEN c.ENTRADA IN ('S', 'T') THEN 'S' ELSE 'N' END AS com_entrada,
-        COALESCE(NULLIF(cf.FATOR, 0), NULLIF(c.FATOR, 0), 1) AS fator,
+        COALESCE(NULLIF(c.FATOR, 0), 1) AS fator,
         c.PERCDESCONTO      AS desconto_perc,
         c.PARCELAMINIMA     AS parcela_minima,
         c.PERCMINIMOENTRADA AS entrada_minima_perc,
-        CAST(c.DATAFINAL AS DATE) AS valida_ate
+        CAST(c.DATAINICIO AS DATE) AS inicio,
+        CAST(c.DATAFINAL AS DATE)  AS fim
       FROM CONDPGVENDA c
-      LEFT JOIN CONDPGVENDAFATORFILIAL cf ON cf.IDCONDPGVENDA = c.IDCONDPGVENDA AND cf.IDFILIAL = CAST(:filial AS VARCHAR(10))
       WHERE COALESCE(c.ATIVO, 'T') IN ('S', 'T')
         AND COALESCE(c.RENEGOCIACAO, 'F') NOT IN ('S', 'T')
         AND COALESCE(c.EXCLUSIVA_CLIENTE, 'F') NOT IN ('S', 'T')
-        AND (c.DATAINICIO IS NULL OR CAST(c.DATAINICIO AS DATE) <= CURRENT_DATE)
-        AND (c.DATAFINAL IS NULL OR CAST(c.DATAFINAL AS DATE) >= CURRENT_DATE)
-      ORDER BY 3, 2
 
-  simular_parcelamento:
-    descricao: >
-      "Fica quanto em 10x?" Simula um valor em todas as condições de pagamento ativas: total
-      com o fator da condição e valor de cada parcela. Já remove as condições em que a parcela
-      ficaria abaixo da mínima. Passe em valor o preço do produto (preco_aprazo para condições
-      a prazo). É uma ESTIMATIVA: o valor final é o que o vendedor fechar no sistema.
-    params:
-      - nome: valor
-        tipo: numero
-        obrigatorio: true
-        exemplo: "1999.90"
-      - nome: filial
-        tipo: texto
-        padrao: "01"
-        exemplo: "01"
+  # Fator da condição por loja (quando a loja tem um diferente do padrão).
+  condicao_fator:
+    chave: [codigo, filial]
+    intervalo_minutos: 30
+    sql: |
+      SELECT cf.IDCONDPGVENDA AS codigo, cf.IDFILIAL AS filial, cf.FATOR AS fator
+      FROM CONDPGVENDAFATORFILIAL cf
+
+  # ============================================================ LOJA
+
+  # Todas as filiais, inclusive depósito (estoque_por_loja mostra o nome). A consulta lojas
+  # do Supabase só mostra as que têm endereço.
+  loja:
+    chave: [filial]
+    intervalo_minutos: 60
     sql: |
       SELECT
-        x.codigo, x.descricao, x.parcelas, x.com_entrada, x.fator,
-        ROUND(x.total, 2)              AS total,
-        ROUND(x.total / x.parcelas, 2) AS valor_parcela
-      FROM (
-        SELECT
-          c.IDCONDPGVENDA        AS codigo,
-          c.DESCRICAOCONDPGVENDA AS descricao,
-          COALESCE(NULLIF(c.PARCELA, 0),
-                   NULLIF(  CASE WHEN c.DIAS1 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS2 IS NOT NULL THEN 1 ELSE 0 END
-                          + CASE WHEN c.DIAS3 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS4 IS NOT NULL THEN 1 ELSE 0 END
-                          + CASE WHEN c.DIAS5 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS6 IS NOT NULL THEN 1 ELSE 0 END
-                          + CASE WHEN c.DIAS7 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS8 IS NOT NULL THEN 1 ELSE 0 END
-                          + CASE WHEN c.DIAS9 IS NOT NULL THEN 1 ELSE 0 END + CASE WHEN c.DIAS10 IS NOT NULL THEN 1 ELSE 0 END, 0),
-                   1) AS parcelas,
-          CASE WHEN c.ENTRADA IN ('S', 'T') THEN 'S' ELSE 'N' END AS com_entrada,
-          COALESCE(NULLIF(cf.FATOR, 0), NULLIF(c.FATOR, 0), 1) AS fator,
-          CAST(:valor AS DOUBLE PRECISION) * COALESCE(NULLIF(cf.FATOR, 0), NULLIF(c.FATOR, 0), 1) AS total,
-          c.PARCELAMINIMA AS parcela_minima
-        FROM CONDPGVENDA c
-        LEFT JOIN CONDPGVENDAFATORFILIAL cf ON cf.IDCONDPGVENDA = c.IDCONDPGVENDA AND cf.IDFILIAL = CAST(:filial AS VARCHAR(10))
-        WHERE COALESCE(c.ATIVO, 'T') IN ('S', 'T')
-          AND COALESCE(c.RENEGOCIACAO, 'F') NOT IN ('S', 'T')
-          AND COALESCE(c.EXCLUSIVA_CLIENTE, 'F') NOT IN ('S', 'T')
-          AND (c.DATAINICIO IS NULL OR CAST(c.DATAINICIO AS DATE) <= CURRENT_DATE)
-          AND (c.DATAFINAL IS NULL OR CAST(c.DATAFINAL AS DATE) >= CURRENT_DATE)
-      ) x
-      WHERE x.parcela_minima IS NULL OR x.parcela_minima <= 0 OR x.total / x.parcelas >= x.parcela_minima
-      ORDER BY x.parcelas, x.total
-
-  negociar_preco:
-    descricao: >
-      "Faz por R$ X?" / "Dá pra fazer tal valor?". Diz se o valor pedido pelo cliente cabe no
-      desconto permitido para o produto (à vista). Produto em promoção ou marcado "sem desconto"
-      não tem desconto extra. Responda só "consigo" / "não consigo, o melhor é R$ preco_minimo".
-      NUNCA diga ao cliente qual é o desconto máximo nem que existe um limite.
-    params:
-      - nome: codigo
-        tipo: inteiro
-        obrigatorio: true
-        exemplo: "1"
-      - nome: valor_pedido
-        tipo: numero
-        obrigatorio: true
-        descricao: valor que o cliente quer pagar
-        exemplo: "1800"
-      - nome: filial
-        tipo: texto
-        padrao: "01"
-        exemplo: "01"
-      - nome: desconto_maximo_loja
-        tipo: numero
-        fixo: true
-        padrao: "5"  # % usado quando o grupo do produto não define PERCDESCONTO. Combine com a loja.
-    sql: |
-      SELECT
-        y.codigo, y.descricao, y.preco_referencia, y.valor_pedido,
-        ROUND(y.preco_referencia * (1 - y.desconto_maximo_perc / 100), 2) AS preco_minimo,
-        ROUND((1 - y.valor_pedido / NULLIF(y.preco_referencia, 0)) * 100, 2) AS desconto_pedido_perc,
-        CASE WHEN y.valor_pedido >= ROUND(y.preco_referencia * (1 - y.desconto_maximo_perc / 100), 2)
-             THEN 'S' ELSE 'N' END AS pode_aceitar
-      FROM (
-        SELECT
-          x.codigo, x.descricao,
-          COALESCE(x.preco_promocional, x.preco_avista) AS preco_referencia,
-          CASE WHEN x.preco_promocional IS NOT NULL OR x.sem_desconto = 'S' THEN 0
-               ELSE COALESCE(NULLIF(x.desconto_grupo, 0), CAST(:desconto_maximo_loja AS DOUBLE PRECISION)) END AS desconto_maximo_perc,
-          CAST(:valor_pedido AS DOUBLE PRECISION) AS valor_pedido
-        FROM (
-          SELECT
-            p.IDPRODUTO        AS codigo,
-            p.DESCRICAOPRODUTO AS descricao,
-            p.PRECOAVISTA      AS preco_avista,
-            COALESCE(
-              (SELECT FIRST 1 pp.PRECOAVISTA FROM PRODUTOPROMOCAO pp
-                WHERE pp.IDPRODUTO = p.IDPRODUTO AND pp.IDFILIAL = CAST(:filial AS VARCHAR(10))
-                  AND CURRENT_DATE BETWEEN CAST(pp.DATAINI AS DATE) AND CAST(pp.DATAFIM AS DATE)
-                  AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
-                ORDER BY pp.DATAINI DESC),
-              CASE WHEN p.PROMOCAO IN ('S', 'T') AND p.PRECOPROMOCAO > 0
-                    AND CURRENT_DATE BETWEEN COALESCE(CAST(p.DATAINICIOPROMOCAO AS DATE), CURRENT_DATE)
-                                         AND COALESCE(CAST(p.DATAFIMPROMOCAO AS DATE), CURRENT_DATE)
-                   THEN p.PRECOPROMOCAO END
-            ) AS preco_promocional,
-            CASE WHEN p.NAOTEMDESCONTO IN ('S', 'T') OR g.PROIBIRDESCONTO IN ('S', 'T')
-                 THEN 'S' ELSE 'N' END AS sem_desconto,
-            g.PERCDESCONTO AS desconto_grupo
-          FROM PRODUTO p
-          LEFT JOIN GRUPO g ON g.IDGRUPO = p.IDGRUPO
-          WHERE p.IDPRODUTO = :codigo
-        ) x
-      ) y
+        f.IDFILIAL AS filial,
+        COALESCE(f.NOMEFANTASIA, f.NOMEFILIAL) AS nome,
+        f.ENDERECO AS endereco,
+        f.NUMERO   AS numero,
+        f.BAIRRO   AS bairro,
+        f.CIDADE   AS cidade,
+        f.UF       AS uf,
+        f.CEP      AS cep,
+        f.TELEFONES AS telefones,
+        f.EMAIL    AS email,
+        f.ORDEMEXIBICAO AS ordem
+      FROM FILIAL f
 
   # ============================================================ CLIENTE
   #
-  # Telefone identifica, mas não autentica (número troca de dono, celular da família...).
-  # Fluxo sugerido para a IA: cliente_por_telefone para cumprimentar pelo nome; para qualquer
-  # dado financeiro ou de compra, pedir o CPF e usar as consultas por documento.
-  #
-  # TÍTULOS EM ABERTO: RECEBER.STATUS = '0'. Deduzido do diag_status (VALORPAGO nunca é
-  # preenchido; '1' = 387 mil títulos/R$ 73 mi = histórico quitado; '0' = 11 mil/R$ 2,3 mi).
-  # CONFIRMAR com diag_receber e diag_receber_amostra antes de ligar para clientes reais.
+  # Dado pessoal (LGPD): no Supabase fica num schema que não é exposto e só a Edge Function lê.
 
-  cliente_por_telefone:
-    descricao: >
-      "Já sou cliente?" Procura o cadastro pelo telefone do WhatsApp (compara os últimos 8
-      dígitos com celular, telefones e telefone alternativo). Pode voltar mais de um cadastro
-      (família usando o mesmo número). Mostra só os 4 últimos dígitos do CPF/CNPJ; para dados
-      financeiros peça o CPF completo e use cliente_por_documento.
-    max_linhas: 5
-    params:
-      - nome: telefone
-        tipo: telefone
-        obrigatorio: true
-        descricao: número do WhatsApp, em qualquer formato (5522987654321, (22) 98765-4321...)
-        exemplo: "5522987654321"
-    sql: |
-      SELECT FIRST 5
-        c.NOMECLIENTE AS nome,
-        RIGHT(REPLACE(REPLACE(REPLACE(TRIM(c.DOCTOCLIENTE), '.', ''), '-', ''), '/', ''), 4) AS documento_final4,
-        c.CIDADE AS cidade,
-        c.BAIRRO AS bairro,
-        CAST(c.DATACADASTRO AS DATE)     AS cliente_desde,
-        CAST(c.DATAULTIMACOMPRA AS DATE) AS ultima_compra,
-        CASE WHEN COALESCE(c.ATIVO, 'T') IN ('S', 'T') THEN 'S' ELSE 'N' END AS ativo
-      FROM (
-        SELECT c2.DOCTOCLIENTE AS doc FROM CLIENTE c2
-        WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(c2.CELULAR, ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', ''), '/', '') CONTAINING :telefone_final8
-           OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(c2.TELEFONES, ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', ''), '/', '') CONTAINING :telefone_final8
-           OR REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(c2.TELEFONEALTERNATIVO, ''), ' ', ''), '-', ''), '(', ''), ')', ''), '.', ''), '/', '') CONTAINING :telefone_final8
-        UNION
-        SELECT t.DOCTOCLIENTE FROM TELEFONES t
-        WHERE REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(t.TELEFONE, ' ', ''), '-', ''), '(', ''), ')', ''), '.', ''), '/', '') CONTAINING :telefone_final8
-      ) achados
-      JOIN CLIENTE c ON c.DOCTOCLIENTE = achados.doc
-      ORDER BY c.DATAULTIMACOMPRA DESC NULLS LAST
-
-  cliente_por_documento:
-    descricao: >
-      Cadastro do cliente pelo CPF/CNPJ (com ou sem pontuação): nome, contato, endereço,
-      cliente desde, última compra, limite de crédito, situação, quanto deve e quantas parcelas
-      estão atrasadas. Nenhuma linha = não é cliente.
-    max_linhas: 1
-    params:
-      - nome: documento
-        tipo: documento
-        obrigatorio: true
-        exemplo: "123.456.789-09"
+  cliente:
+    chave: [documento]
+    intervalo_minutos: 30
     sql: |
       SELECT
-        c.NOMECLIENTE   AS nome,
         c.DOCTOCLIENTE  AS documento,
+        c.NOMECLIENTE   AS nome,
         c.EMAIL         AS email,
         c.CELULAR       AS celular,
         c.TELEFONES     AS telefones,
+        c.TELEFONEALTERNATIVO AS telefone_alternativo,
+        (SELECT LIST(TRIM(t.TELEFONE), '|') FROM TELEFONES t
+          WHERE t.DOCTOCLIENTE = c.DOCTOCLIENTE) AS telefones_extra,
         c.ENDERECO      AS endereco,
         c.NUMERO        AS numero,
         c.COMPLEMENTO   AS complemento,
@@ -549,71 +215,50 @@ consultas:
         c.VALORULTIMACOMPRA AS valor_ultima_compra,
         c.LIMITECREDITO     AS limite_credito,
         s.NOMESITUACAO      AS situacao,
-        CASE WHEN COALESCE(c.ATIVO, 'T') IN ('S', 'T') THEN 'S' ELSE 'N' END AS ativo,
-        (SELECT COALESCE(SUM(r.VALOR), 0) FROM RECEBER r
-          WHERE r.DOCTOCLIENTE = c.DOCTOCLIENTE AND r.STATUS = '0') AS saldo_devedor,
-        (SELECT COUNT(*) FROM RECEBER r
-          WHERE r.DOCTOCLIENTE = c.DOCTOCLIENTE AND r.STATUS = '0'
-            AND CAST(r.VENCIMENTO AS DATE) < CURRENT_DATE) AS parcelas_atrasadas
+        CASE WHEN COALESCE(c.ATIVO, 'T') IN ('S', 'T') THEN 'S' ELSE 'N' END AS ativo
       FROM CLIENTE c
       LEFT JOIN SITUACAO s ON s.IDSITUACAO = c.IDSITUACAO
-      WHERE c.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
 
-  parcelas_em_aberto:
-    descricao: >
-      "Quanto eu devo?" / "Manda meu boleto". Parcelas em aberto do cliente pelo CPF/CNPJ, da
-      mais antiga para a mais nova, com dias de atraso, PIX copia e cola e código de barras
-      quando o ERP tiver gerado. Valores sem juros/multa de atraso: para o valor atualizado,
-      oriente o cliente a falar com a loja.
-    max_linhas: 36
-    params:
-      - nome: documento
-        tipo: documento
-        obrigatorio: true
-        exemplo: "123.456.789-09"
+  # Títulos em aberto (STATUS '0'). Título pago some do Supabase; por isso o limite de remoção
+  # é maior que o padrão (um dia de muitos pagamentos não deve travar a sincronização).
+  # CONFIRMAR com diag_receber e diag_receber_amostra antes de ligar para clientes reais.
+  parcela:
+    chave: [filial, titulo]
+    intervalo_minutos: 10
+    max_remocao_perc: 50
     sql: |
-      SELECT FIRST 36
+      SELECT
         r.IDFILIAL       AS filial,
         r.NUMERORECEBER  AS titulo,
         r.SEQPARCELA     AS parcela,
+        r.DOCTOCLIENTE   AS documento,
         r.NUMEROSAIDA    AS venda,
         CAST(r.DATAEMISSAO AS DATE) AS emissao,
         CAST(r.VENCIMENTO AS DATE)  AS vencimento,
         r.VALOR                     AS valor,
-        CASE WHEN CAST(r.VENCIMENTO AS DATE) < CURRENT_DATE
-             THEN DATEDIFF(DAY FROM CAST(r.VENCIMENTO AS DATE) TO CURRENT_DATE) ELSE 0 END AS dias_atraso,
         pt.DESCRICAOPORTADOR  AS forma,
         r.QRCODEPIXCOPIAECOLA AS pix_copia_e_cola,
         r.CODIGODEBARRAS      AS codigo_barras
       FROM RECEBER r
       LEFT JOIN PORTADOR pt ON pt.IDPORTADOR = r.IDPORTADOR
-      WHERE r.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
-        AND r.STATUS = '0'
-      ORDER BY r.VENCIMENTO
+      WHERE r.STATUS = '0'
 
-  compras_cliente:
-    descricao: >
-      "O que eu comprei?" / "Cadê meu pedido?" / "Quando entrega?" / "Quando vem o montador?".
-      Últimas 10 compras do cliente (não canceladas) com itens, valor, nota fiscal, se é entrega
-      em casa e as datas de entrega e montagem registradas no ERP. Em itens, "(entregue)" marca
-      o que já foi entregue; itens_pendentes = quantos ainda faltam entregar.
-    max_linhas: 10
-    params:
-      - nome: documento
-        tipo: documento
-        obrigatorio: true
-        exemplo: "123.456.789-09"
+  # Vendas válidas dos últimos 24 meses, com os itens em texto. Itens com
+  # IDPRODUTOREFERENCIA são garantia estendida, não produto (VIEWFATURAMENTO).
+  compra:
+    chave: [filial, venda]
+    intervalo_minutos: 30
     sql: |
-      SELECT FIRST 10
+      SELECT
         s.IDFILIAL      AS filial,
         s.NUMEROSAIDA   AS venda,
+        s.DOCTOCLIENTE  AS documento,
         CAST(s.DATASAIDA AS DATE) AS data,
         s.VALTOTNOTA    AS total,
         s.NUMERONOTAFISCAL AS nota_fiscal,
         CASE WHEN s.ENTREGARADOMICILIO IN ('S', 'T') THEN 'S' ELSE 'N' END AS entrega_domicilio,
         CAST(s.DATAENTREGA AS DATE)  AS data_entrega,
         CAST(s.DATAMONTAGEM AS DATE) AS data_montagem,
-        -- Itens com IDPRODUTOREFERENCIA são garantia estendida, não produto (VIEWFATURAMENTO).
         (SELECT LIST(CAST(CAST(i.QTDE AS INTEGER) AS VARCHAR(10)) || 'x ' || p.DESCRICAOPRODUTO
                      || CASE WHEN i.ENTREGUE IN ('S', 'T') THEN ' (entregue)' ELSE '' END, ' | ')
            FROM ITEMSAIDA i JOIN PRODUTO p ON p.IDPRODUTO = i.IDPRODUTO
@@ -624,15 +269,20 @@ consultas:
             AND i.IDPRODUTOREFERENCIA IS NULL
             AND COALESCE(i.ENTREGUE, 'F') NOT IN ('S', 'T')) AS itens_pendentes
       FROM SAIDA s
-      WHERE s.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
-        AND s.STATUS = 'A'
+      WHERE s.STATUS = 'A'
         AND s.TIPOSAIDA IN ('1', '2', '9')
-      ORDER BY s.DATASAIDA DESC
+        AND s.DATASAIDA >= DATEADD(-24 MONTH TO CURRENT_DATE)
 
-  # PEDIDOVENDA está vazia na Sonho Real: desligada para a IA (admin) para ela não dizer
-  # "você não tem pedidos" a quem tem compra em SAIDA. Religue tirando o admin se passarem a usar.
+consultas:
+
+  # ============================================================ DIAGNÓSTICO
+  #
+  # Pedir pelo Supabase:  POST /admin/comandos {"tipo": "consulta", "consulta": "diag_versao"}
+  # e ler o resultado em  GET /admin/comandos/{id}  (o worker responde em até 30 s).
+
+  # PEDIDOVENDA está vazia na Sonho Real, por isso não é copiada para o Supabase (a IA diria
+  # "você não tem pedidos" a quem comprou). Se passarem a usar, vira uma extração em sincronizar.
   pedidos_cliente:
-    admin: true
     descricao: >
       Últimos 10 pedidos de venda do cliente (não cancelados) com itens, status, data de entrega
       e de montagem.
@@ -663,9 +313,8 @@ consultas:
         AND pv.DATACANCELAMENTO IS NULL
       ORDER BY pv.DATAPEDIDOVENDA DESC
 
-  # ASSISTENCIA também está vazia: desligada pelo mesmo motivo.
+  # ASSISTENCIA também está vazia: fica só como diagnóstico, pelo mesmo motivo.
   assistencias_cliente:
-    admin: true
     descricao: >
       Assistências técnicas do cliente com status, previsão e conclusão.
     max_linhas: 10
@@ -688,33 +337,9 @@ consultas:
       WHERE a.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
       ORDER BY a.DATA DESC
 
-  # ============================================================ LOJA
 
-  lojas:
-    descricao: >
-      "Onde fica a loja?" Lojas com endereço, telefone e e-mail. O campo filial é o código
-      usado nas outras consultas.
-    params: []
-    sql: |
-      SELECT
-        f.IDFILIAL AS filial,
-        COALESCE(f.NOMEFANTASIA, f.NOMEFILIAL) AS nome,
-        f.ENDERECO AS endereco,
-        f.NUMERO   AS numero,
-        f.BAIRRO   AS bairro,
-        f.CIDADE   AS cidade,
-        f.UF       AS uf,
-        f.CEP      AS cep,
-        f.TELEFONES AS telefones,
-        f.EMAIL    AS email
-      FROM FILIAL f
-      WHERE COALESCE(TRIM(f.ENDERECO), '') <> ''  -- depósito/encomenda não têm endereço
-      ORDER BY COALESCE(f.ORDEMEXIBICAO, 999), f.IDFILIAL
-
-  # ============================================================ DIAGNÓSTICO (só token_admin)
 
   diag_versao:
-    admin: true
     descricao: Versão do Firebird, charset do banco e hora do servidor.
     params: []
     sql: |
@@ -725,7 +350,6 @@ consultas:
       FROM RDB$DATABASE
 
   diag_status:
-    admin: true
     descricao: >
       Valores distintos dos campos de status usados nas consultas, com quantidade. Tabela que
       não aparece está vazia. Pode demorar alguns segundos.
@@ -744,7 +368,6 @@ consultas:
       ORDER BY 1, 3 DESC
 
   diag_receber:
-    admin: true
     descricao: >
       Títulos emitidos nos últimos 2 anos agrupados por STATUS: vencimentos, quantos ainda vão
       vencer e quantos têm baixa (pagamento) na tabela RECEBIDO. Status com quase todos "com_baixa"
@@ -768,7 +391,6 @@ consultas:
       ORDER BY 2 DESC
 
   diag_receber_amostra:
-    admin: true
     descricao: >
       Até 5 títulos do último ano de cada STATUS, com cliente e valor, para conferir na tela do
       ERP o que cada status significa.
@@ -800,7 +422,6 @@ consultas:
              WHERE r.STATUS = 'A' AND r.DATAEMISSAO >= CURRENT_DATE - 365 ORDER BY r.DATAEMISSAO DESC) e
 
   diag_flags:
-    admin: true
     descricao: >
       Valores dos campos sim/não usados nas consultas de produto e pagamento, e quantas linhas
       têm as tabelas de fator de parcelamento (se tiverem, o "sem juros" pode não ser real).
@@ -819,7 +440,6 @@ consultas:
       ORDER BY 1, 3 DESC
 
   diag_views:
-    admin: true
     descricao: >
       Código SQL das views e procedures VIEW* que o fornecedor do ERP indicou (VIEWPRODUTOS,
       VIEWESTOQUE, VIEWCLIENTES, VIEWFATURAMENTO). Lê só tabelas de sistema: não precisa de GRANT.
@@ -836,7 +456,6 @@ consultas:
       ORDER BY 1
 
   diag_view_colunas:
-    admin: true
     descricao: Colunas de uma view, ou parâmetros e colunas de uma procedure, pelo nome.
     params:
       - nome: nome
@@ -855,7 +474,6 @@ consultas:
       ORDER BY 1, 2
 
   diag_estoque:
-    admin: true
     descricao: >
       Compara as duas colunas de saldo da tabela ESTOQUE por filial: QTDER (a que o fornecedor
       usa na VIEWESTOQUE) e ESTOQUE. Só produtos ativos.
@@ -875,7 +493,6 @@ consultas:
       ORDER BY 1
 
   diag_fotos:
-    admin: true
     descricao: Quantas fotos de produto existem no banco, em que formato (binário, miniatura, URL) e o tamanho médio.
     params: []
     sql: |
@@ -892,7 +509,6 @@ consultas:
       LEFT JOIN PRODUTO p ON p.IDPRODUTO = pf.IDPRODUTO
 
   diag_fotos_amostra:
-    admin: true
     descricao: Até 10 fotos de produtos ativos, com nome do arquivo, URL e tamanho.
     max_linhas: 10
     params: []
@@ -907,7 +523,6 @@ consultas:
       ORDER BY pf.IDPRODUTO DESC
 
   diag_amostra_clientes:
-    admin: true
     descricao: Últimos 10 clientes cadastrados, para ver como CPF e telefones são gravados.
     params: []
     sql: |
@@ -917,7 +532,6 @@ consultas:
       ORDER BY DATACADASTRO DESC NULLS LAST
 
   diag_amostra_produtos:
-    admin: true
     descricao: Últimos 10 produtos cadastrados, para ver se a descrição tem acento e como é escrita.
     params: []
     sql: |
@@ -927,7 +541,6 @@ consultas:
       ORDER BY DATACADASTRO DESC NULLS LAST
 
   diag_indices:
-    admin: true
     descricao: >
       Índices das tabelas consultadas por cliente. Sem índice em DOCTOCLIENTE, as consultas por
       CPF varrem a tabela inteira (funciona, mas fica mais lento).

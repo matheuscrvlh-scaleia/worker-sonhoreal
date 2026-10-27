@@ -1,12 +1,23 @@
 package consultas
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 )
 
 const yamlTeste = `
+sincronizar:
+  estoque:
+    chave: [CODIGO, filial]
+    sql: SELECT IDPRODUTO AS codigo, IDFILIAL AS filial, ':x' AS y FROM ESTOQUE
+  foto:
+    tipo: foto
+    chave: [codigo, seq]
+    intervalo_minutos: 60
+    sql: SELECT IDPRODUTO AS codigo, SEQ AS seq FROM PRODUTOFOTO
+    sql_arquivo: SELECT FOTO FROM PRODUTOFOTO WHERE IDPRODUTO = :codigo AND SEQ = :seq
 consultas:
   busca:
     params:
@@ -82,17 +93,56 @@ func TestNumeroBR(t *testing.T) {
 	}
 }
 
+func TestExtracoes(t *testing.T) {
+	cj := carregar(t)
+	e := cj.Extracoes["estoque"]
+	if e.Tabela != "estoque" || e.IntervaloMinutos != 10 || e.MaxRemocaoPerc != 30 {
+		t.Errorf("padrões errados: %+v", e)
+	}
+	if !reflect.DeepEqual(e.Chave, []string{"codigo", "filial"}) {
+		t.Errorf("chave = %v (deveria vir em minúsculas)", e.Chave)
+	}
+	f := cj.Extracoes["foto"]
+	_, args, err := f.Arquivo.Montar(map[string]string{"codigo": "14386", "seq": "2"})
+	if err != nil || !reflect.DeepEqual(args, []any{int64(14386), int64(2)}) {
+		t.Errorf("sql_arquivo: args = %#v, err = %v", args, err)
+	}
+}
+
 func TestRecusaArquivoRuim(t *testing.T) {
+	const ok = "sincronizar:\n  e:\n    chave: [a]\n    sql: SELECT 1 AS a FROM T\n"
 	ruins := map[string]string{
-		"param não declarado": "consultas:\n  x:\n    sql: SELECT 1 FROM T WHERE A = :nada\n",
-		"não é SELECT":        "consultas:\n  x:\n    sql: DELETE FROM T\n",
-		"tipo inválido":       "consultas:\n  x:\n    params: [{nome: a, tipo: bool}]\n    sql: SELECT :a FROM T\n",
-		"fixo sem padrão":     "consultas:\n  x:\n    params: [{nome: a, tipo: texto, fixo: true}]\n    sql: SELECT :a FROM T\n",
-		"vazio":               "consultas: {}\n",
+		"param não declarado":    ok + "consultas:\n  x:\n    sql: SELECT 1 FROM T WHERE A = :nada\n",
+		"não é SELECT":           ok + "consultas:\n  x:\n    sql: DELETE FROM T\n",
+		"tipo inválido":          ok + "consultas:\n  x:\n    params: [{nome: a, tipo: bool}]\n    sql: SELECT :a FROM T\n",
+		"fixo sem padrão":        ok + "consultas:\n  x:\n    params: [{nome: a, tipo: texto, fixo: true}]\n    sql: SELECT :a FROM T\n",
+		"sem extração":           "consultas: {}\n",
+		"extração sem chave":     "sincronizar:\n  e:\n    sql: SELECT 1 FROM T\n",
+		"extração com parâmetro": "sincronizar:\n  e:\n    chave: [a]\n    sql: SELECT 1 AS a FROM T WHERE B = :b\n",
+		"extração não é SELECT":  "sincronizar:\n  e:\n    chave: [a]\n    sql: UPDATE T SET A = 1\n",
+		"foto sem sql_arquivo":   "sincronizar:\n  e:\n    tipo: foto\n    chave: [codigo, seq]\n    sql: SELECT 1 AS codigo, 1 AS seq FROM T\n",
+		"foto com outra chave":   "sincronizar:\n  e:\n    tipo: foto\n    chave: [id]\n    sql: SELECT 1 AS id FROM T\n    sql_arquivo: SELECT F FROM T\n",
 	}
 	for nome, y := range ruins {
 		if _, err := Carregar([]byte(y)); err == nil {
 			t.Errorf("%s: deveria recusar", nome)
+		}
+	}
+}
+
+// O queries.yaml do repositório é o que vai para o cliente: tem que carregar.
+func TestQueriesDoRepositorio(t *testing.T) {
+	conteudo, err := os.ReadFile("../../queries.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cj, err := Carregar(conteudo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, nome := range []string{"produto", "estoque", "promocao", "foto", "condicao", "condicao_fator", "loja", "cliente", "parcela", "compra"} {
+		if cj.Extracoes[nome] == nil {
+			t.Errorf("falta a extração %s (a tabela fdc.%s existe no Supabase)", nome, nome)
 		}
 	}
 }

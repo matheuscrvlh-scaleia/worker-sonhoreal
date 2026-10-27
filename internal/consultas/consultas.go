@@ -1,5 +1,5 @@
-// Package consultas carrega o queries.yaml: cada consulta é um SQL com parâmetros
-// nomeados (:nome) e tipados, exposto como GET/POST /q/{nome}.
+// Package consultas carrega o queries.yaml: as extrações (sincronizar), que o worker copia
+// para o Supabase, e as consultas de diagnóstico, com parâmetros nomeados (:nome) e tipados.
 package consultas
 
 import (
@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,19 +19,37 @@ import (
 )
 
 type Arquivo struct {
-	Consultas map[string]*Consulta `yaml:"consultas"`
+	Sincronizar map[string]*Extracao `yaml:"sincronizar"`
+	Consultas   map[string]*Consulta `yaml:"consultas"`
 }
 
+// Extracao é uma tabela copiada para o Supabase. O SQL roda inteiro a cada intervalo e o
+// worker manda só as linhas que mudaram (compara o hash de cada linha). As colunas do SQL
+// têm o mesmo nome das colunas da tabela fdc.<nome> (supabase/migrations).
+type Extracao struct {
+	Tabela    string `yaml:"-"`
+	Descricao string `yaml:"descricao"`
+	// Colunas do SQL que identificam a linha no ERP; viram a "chave" no Supabase ("14386|01").
+	Chave            []string `yaml:"chave"`
+	IntervaloMinutos int      `yaml:"intervalo_minutos"`
+	// Se for apagar mais que isso (% das linhas já enviadas), o worker não apaga nada e
+	// avisa: protege a cópia de um SQL quebrado ou de um banco restaurado de backup antigo.
+	MaxRemocaoPerc int `yaml:"max_remocao_perc"`
+	// Tipo "foto": cada linha é uma imagem; sql_arquivo busca o binário por :codigo e :seq.
+	Tipo       string `yaml:"tipo"`
+	SQL        string `yaml:"sql"`
+	SQLArquivo string `yaml:"sql_arquivo"`
+
+	Arquivo *Consulta `yaml:"-"`
+}
+
+// Consulta de diagnóstico: roda quando a equipe pede pelo Supabase (fdc.comando) ou no -testar.
 type Consulta struct {
-	Nome      string `yaml:"-" json:"nome"`
-	Descricao string `yaml:"descricao" json:"descricao"`
-	Admin     bool   `yaml:"admin" json:"-"`
-	// Resposta "imagem": a 1ª coluna é um BLOB de imagem, servido pela rota /foto
-	// (pública, sem token). Não aparece na lista de consultas para a IA.
-	Resposta  string   `yaml:"resposta" json:"-"`
-	MaxLinhas int      `yaml:"max_linhas" json:"-"`
-	Params    []*Param `yaml:"params" json:"params"`
-	SQL       string   `yaml:"sql" json:"-"`
+	Nome      string   `yaml:"-"`
+	Descricao string   `yaml:"descricao"`
+	MaxLinhas int      `yaml:"max_linhas"`
+	Params    []*Param `yaml:"params"`
+	SQL       string   `yaml:"sql"`
 
 	sqlPosicional string   // SQL com ? no lugar de :nome
 	ordem         []string // nome de cada ?, na ordem em que aparece
@@ -44,7 +61,7 @@ type Param struct {
 	Descricao   string `yaml:"descricao" json:"descricao,omitempty"`
 	Obrigatorio bool   `yaml:"obrigatorio" json:"obrigatorio"`
 	Padrao      string `yaml:"padrao" json:"padrao,omitempty"`
-	// Exemplo aparece na listagem para a IA e é usado pelo "ponte-api -testar".
+	// Exemplo é usado pelo "worker-fdc -testar".
 	Exemplo string `yaml:"exemplo" json:"exemplo,omitempty"`
 	// Fixo: quem chama não consegue mudar, vale sempre o padrão (ex.: desconto máximo da loja).
 	Fixo bool `yaml:"fixo" json:"-"`
@@ -56,6 +73,7 @@ type Param struct {
 // Conjunto é o queries.yaml já validado e pronto para uso.
 type Conjunto struct {
 	SHA256    string
+	Extracoes map[string]*Extracao
 	Consultas map[string]*Consulta
 }
 
@@ -71,8 +89,17 @@ func Carregar(conteudo []byte) (*Conjunto, error) {
 	if err := yaml.Unmarshal(bytes.TrimPrefix(conteudo, []byte("\xef\xbb\xbf")), &a); err != nil {
 		return nil, fmt.Errorf("YAML inválido: %w", err)
 	}
-	if len(a.Consultas) == 0 {
-		return nil, fmt.Errorf("nenhuma consulta definida")
+	if len(a.Sincronizar) == 0 {
+		return nil, fmt.Errorf("nenhuma extração em sincronizar")
+	}
+	for nome, e := range a.Sincronizar {
+		if e == nil {
+			return nil, fmt.Errorf("extração %s vazia", nome)
+		}
+		e.Tabela = nome
+		if err := e.preparar(); err != nil {
+			return nil, fmt.Errorf("extração %s: %w", nome, err)
+		}
 	}
 	for nome, c := range a.Consultas {
 		if c == nil {
@@ -84,19 +111,67 @@ func Carregar(conteudo []byte) (*Conjunto, error) {
 		}
 	}
 	soma := sha256.Sum256(conteudo)
-	return &Conjunto{SHA256: hex.EncodeToString(soma[:]), Consultas: a.Consultas}, nil
+	return &Conjunto{SHA256: hex.EncodeToString(soma[:]), Extracoes: a.Sincronizar, Consultas: a.Consultas}, nil
 }
 
-func (c *Consulta) preparar() error {
-	if strings.TrimSpace(c.SQL) == "" {
+func (e *Extracao) preparar() error {
+	if err := soSelect(e.SQL); err != nil {
+		return err
+	}
+	if _, ordem, err := nomeadosParaPosicionais(e.SQL); err != nil {
+		return err
+	} else if len(ordem) > 0 {
+		return fmt.Errorf("o SQL de extração não aceita parâmetros (:%s)", ordem[0])
+	}
+	if len(e.Chave) == 0 {
+		return fmt.Errorf("chave vazia")
+	}
+	for i := range e.Chave {
+		e.Chave[i] = strings.ToLower(e.Chave[i])
+	}
+	if e.IntervaloMinutos <= 0 {
+		e.IntervaloMinutos = 10
+	}
+	if e.MaxRemocaoPerc <= 0 {
+		e.MaxRemocaoPerc = 30
+	}
+	switch e.Tipo {
+	case "":
+	case "foto":
+		if strings.Join(e.Chave, ",") != "codigo,seq" {
+			return fmt.Errorf("tipo foto exige chave [codigo, seq]")
+		}
+		e.Arquivo = &Consulta{
+			Nome: e.Tabela + ".sql_arquivo",
+			SQL:  e.SQLArquivo,
+			Params: []*Param{
+				{Nome: "codigo", Tipo: "inteiro", Obrigatorio: true},
+				{Nome: "seq", Tipo: "inteiro", Obrigatorio: true},
+			},
+		}
+		if err := e.Arquivo.preparar(); err != nil {
+			return fmt.Errorf("sql_arquivo: %w", err)
+		}
+	default:
+		return fmt.Errorf("tipo %q desconhecido (use foto ou deixe vazio)", e.Tipo)
+	}
+	return nil
+}
+
+func soSelect(sql string) error {
+	if strings.TrimSpace(sql) == "" {
 		return fmt.Errorf("sql vazio")
 	}
-	inicio := strings.ToUpper(strings.TrimSpace(c.SQL))
+	inicio := strings.ToUpper(strings.TrimSpace(sql))
 	if !strings.HasPrefix(inicio, "SELECT") && !strings.HasPrefix(inicio, "WITH") {
 		return fmt.Errorf("só SELECT é permitido")
 	}
-	if c.Resposta != "" && c.Resposta != "imagem" {
-		return fmt.Errorf("resposta %q desconhecida (use imagem ou deixe vazio)", c.Resposta)
+	return nil
+}
+
+func (c *Consulta) preparar() error {
+	if err := soSelect(c.SQL); err != nil {
+		return err
 	}
 	disponiveis := map[string]bool{}
 	for _, p := range c.Params {
@@ -316,16 +391,4 @@ func numeroBR(s string) (float64, error) {
 		return 0, fmt.Errorf("inválido")
 	}
 	return f, nil
-}
-
-// Publicas lista as consultas que a IA pode usar, em ordem alfabética.
-func (cj *Conjunto) Publicas() []*Consulta {
-	var out []*Consulta
-	for _, c := range cj.Consultas {
-		if !c.Admin && c.Resposta == "" {
-			out = append(out, c)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Nome < out[j].Nome })
-	return out
 }

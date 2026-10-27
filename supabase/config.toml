@@ -1,0 +1,6 @@
+# Projeto fdc-sonho-real. Só o necessário para "supabase db push" e "supabase functions deploy".
+project_id = "mnhtuzsmwacvsymtbyck"
+
+[functions.fdc]
+# A função confere os próprios tokens (FDC_TOKEN_*); não exige JWT do Supabase.
+verify_jwt = false

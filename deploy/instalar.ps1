@@ -1,15 +1,20 @@
 <#
-  Instala a Ponte ERP nesta maquina. Rodar como Administrador, de dentro da pasta extraida do zip:
+  Instala o worker-fdc nesta maquina. Rodar como Administrador, de dentro da pasta extraida do zip:
 
-    powershell -ExecutionPolicy Bypass -File .\instalar.ps1 -TokenTunel <token do tunel Cloudflare>
+    powershell -ExecutionPolicy Bypass -File .\instalar.ps1 -TokenWorker <FDC_TOKEN_WORKER>
 
-  1a vez: cria C:\ponte\config.json com tokens novos e para, pedindo para preencher o banco.
-  Depois de preencher, rode de novo: testa as consultas, instala os servicos e confere o /health.
+  1a vez: cria C:\worker-fdc\config.json com o token do worker (o que ja esta nos secrets da
+  Edge Function; sem -TokenWorker, gera um novo e mostra o comando para cadastrar) e para,
+  pedindo para conferir o banco. Se achar a instalacao antiga (C:\ponte), aproveita o banco
+  dela e remove o servico PonteERP e o tunel Cloudflare, que nao sao mais usados.
+  Depois de preencher, rode de novo: testa banco, Supabase e extracoes, instala o servico e
+  confere o /health local.
   Rodar de novo outras vezes e seguro: troca os .exe e reinicia, sem mexer no config.json.
 #>
 param(
-  [string]$Destino = "C:\ponte",
-  [string]$TokenTunel = ""
+  [string]$Destino = "C:\worker-fdc",
+  [string]$Antigo = "C:\ponte",
+  [string]$TokenWorker = ""
 )
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -28,79 +33,82 @@ function GravarSemBOM([string]$caminho, [string]$texto) {
 
 $origem = $PSScriptRoot
 New-Item -ItemType Directory -Force $Destino | Out-Null
-$agente = Join-Path $Destino "ponte-agente.exe"
+$agente = Join-Path $Destino "worker-fdc-agente.exe"
 $cfg = Join-Path $Destino "config.json"
 
 # ---- 1. config.json (nunca sobrescreve)
 if (-not (Test-Path $cfg)) {
   $c = Get-Content (Join-Path $origem "config.exemplo.json") -Raw | ConvertFrom-Json
-  $c.api.token = NovoToken
-  $c.api.token_admin = NovoToken
+  $c.supabase.token = if ($TokenWorker) { $TokenWorker.Trim() } else { NovoToken }
+  $velho = Join-Path $Antigo "config.json"
+  if (Test-Path $velho) {
+    $c.banco = (Get-Content $velho -Raw | ConvertFrom-Json).banco
+    Write-Host "Banco copiado da instalacao antiga ($velho)."
+  }
   GravarSemBOM $cfg ($c | ConvertTo-Json -Depth 5)
   Write-Host ""
   Write-Host "config.json criado em $cfg" -ForegroundColor Yellow
-  Write-Host "  token       : $($c.api.token)"
-  Write-Host "  token_admin : $($c.api.token_admin)"
-  Write-Host "Guarde os tokens (vao na configuracao da IA). Agora:"
-  Write-Host "  1. rode usuario_leitura.sql no banco (instrucoes dentro do arquivo)"
-  Write-Host "  2. preencha a secao 'banco' e a 'chave_publica' no config.json"
-  Write-Host "  3. rode este script de novo"
+  Write-Host "Agora:"
+  if (-not $TokenWorker) {
+    Write-Host "  - cadastre o token novo no Supabase (secret da Edge Function fdc):"
+    Write-Host "       npx supabase secrets set FDC_TOKEN_WORKER=$($c.supabase.token) --project-ref mnhtuzsmwacvsymtbyck"
+  }
+  Write-Host "  - confira a secao 'banco' no config.json (e rode usuario_leitura.sql se for banco novo)"
+  Write-Host "  - rode este script de novo"
   notepad $cfg
   exit 0
 }
 
 # ---- 2. testa a versao NOVA (desta pasta) no banco real ANTES de mexer no que esta rodando
-Write-Host "Testando a versao nova (conexao e consultas)..."
-& (Join-Path $origem "ponte-api.exe") -testar -config $cfg -queries (Join-Path $origem "queries.yaml")
+Write-Host "Testando a versao nova (banco, Supabase e extracoes)..."
+& (Join-Path $origem "worker-fdc.exe") -testar -config $cfg -queries (Join-Path $origem "queries.yaml")
 if ($LASTEXITCODE -ne 0) {
   Write-Host "Teste falhou. NADA foi alterado: a versao que estava rodando continua no ar." -ForegroundColor Red
-  Write-Host "Corrija (config.json, queries.yaml ou GRANT no banco) e rode de novo."
+  Write-Host "Corrija (config.json, token no Supabase, queries.yaml ou GRANT no banco) e rode de novo."
   exit 1
 }
 
-# ---- 3. troca os arquivos (o servico fica parado so durante a copia)
-$existia = [bool](Get-Service PonteERP -ErrorAction SilentlyContinue)
+# ---- 3. instalacao antiga (API + tunel Cloudflare): sai do ar, a IA passa a ler o Supabase
+if (Get-Service PonteERP -ErrorAction SilentlyContinue) {
+  Write-Host "Removendo o servico antigo PonteERP..."
+  Stop-Service PonteERP -Force -ErrorAction SilentlyContinue
+  sc.exe delete PonteERP | Out-Null
+}
+if (Get-Service cloudflared -ErrorAction SilentlyContinue) {
+  Write-Host "Removendo o tunel Cloudflare..."
+  Stop-Service cloudflared -Force -ErrorAction SilentlyContinue
+  $cf = Join-Path $Antigo "cloudflared.exe"
+  if (Test-Path $cf) { & $cf service uninstall 2>$null | Out-Null } else { sc.exe delete cloudflared | Out-Null }
+}
+
+# ---- 4. troca os arquivos (o servico fica parado so durante a copia)
+$existia = [bool](Get-Service WorkerFDC -ErrorAction SilentlyContinue)
 if ($existia) {
-  Write-Host "Parando o servico PonteERP para trocar os arquivos..."
+  Write-Host "Parando o servico WorkerFDC para trocar os arquivos..."
   & $agente parar | Out-Null
   Start-Sleep -Seconds 3
 }
 try {
   if ((Resolve-Path $origem).Path -ne (Resolve-Path $Destino).Path) {
-    foreach ($f in "ponte-agente.exe", "ponte-api.exe", "queries.yaml", "config.exemplo.json", "usuario_leitura.sql", "instalar.ps1") {
+    foreach ($f in "worker-fdc-agente.exe", "worker-fdc.exe", "queries.yaml", "config.exemplo.json", "usuario_leitura.sql", "instalar.ps1") {
       Copy-Item (Join-Path $origem $f) $Destino -Force
     }
   }
 } finally {
-  # ---- 4. servico (inicio automatico, reinicia sozinho se cair). Sobe mesmo se a copia falhar.
+  # ---- 5. servico (inicio automatico, reinicia sozinho se cair). Sobe mesmo se a copia falhar.
   if (-not $existia) { & $agente instalar }
   & $agente iniciar
 }
 
-# ---- 5. tunel Cloudflare
-if ($TokenTunel) {
-  $cf = Join-Path $Destino "cloudflared.exe"
-  if (-not (Test-Path $cf)) {
-    Write-Host "Baixando cloudflared..."
-    Invoke-WebRequest "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cf -UseBasicParsing
-  }
-  if (-not (Get-Service cloudflared -ErrorAction SilentlyContinue)) { & $cf service install $TokenTunel }
-  sc.exe failure cloudflared reset= 86400 actions= restart/5000/restart/5000/restart/30000 | Out-Null
-  Start-Service cloudflared -ErrorAction SilentlyContinue
-}
-
-# ---- 6. maquina nao pode dormir
-powercfg /change standby-timeout-ac 0
-powercfg /change hibernate-timeout-ac 0
-
-# ---- 7. conferencia final
-$escutar = (Get-Content $cfg -Raw | ConvertFrom-Json).api.escutar
+# ---- 6. conferencia final
+$escutar = (Get-Content $cfg -Raw | ConvertFrom-Json).local.escutar
 Start-Sleep -Seconds 5
 try {
   $h = Invoke-RestMethod "http://$escutar/health" -TimeoutSec 10
   Write-Host ""
-  Write-Host "PRONTO. API $($h.versao) no ar, banco_ok=$($h.banco_ok), $($h.consultas) consultas." -ForegroundColor Green
-  Write-Host "Logs: $Destino\logs   |   Status: $agente status"
+  Write-Host "PRONTO. worker-fdc $($h.versao) no ar, banco_ok=$($h.banco_ok)." -ForegroundColor Green
+  Write-Host "A primeira carga (clientes, fotos) leva alguns minutos. Acompanhe em $Destino\logs\worker.log"
+  Write-Host "Status: $agente status"
 } catch {
   Write-Host "Servico instalado, mas o /health nao respondeu. Veja $Destino\logs\agente.log" -ForegroundColor Red
   exit 1

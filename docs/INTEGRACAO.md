@@ -102,7 +102,8 @@ curl -X POST "$BASE/q/buscar_produto" \
    e `expires_at`.
 2. Em cada pergunta, `POST /q/{nome}` com `Authorization: Bearer <access_token>`.
 3. Faltando menos de 5 minutos para `expires_at`, renove com o `refresh_token`.
-4. Se vier 401, faça login de novo e repita a chamada uma única vez.
+4. Se vier 401, renove (ou, se a renovação falhar, faça login de novo) e repita a chamada uma
+   única vez.
 
 ---
 
@@ -151,9 +152,10 @@ Todo erro tem o formato `{"erro": "mensagem"}`.
 | HTTP | Quando | O que a IA faz |
 |---|---|---|
 | 400 | parâmetro obrigatório faltando ou inválido (CPF com tamanho errado, número inválido) | pedir o dado de novo ao cliente |
-| 401 | token errado ou ausente | erro de configuração: alertar a equipe |
-| 403 | token sem permissão para a rota (ex.: token do worker em `/q`) | erro de configuração: alertar a equipe |
+| 401 | token vencido, inválido ou ausente (no `/auth/token`: usuário ou senha errados) | renovar o token ou fazer login e repetir uma vez (seção 2); se o login falhar, alertar a equipe |
+| 403 | usuário sem permissão para a rota (ex.: usuário `ia` em `/admin`) | erro de configuração: alertar a equipe |
 | 404 | consulta não existe | conferir o nome |
+| 429 | muitas tentativas de login seguidas | esperar alguns minutos; o cliente HTTP está fazendo login demais |
 | 500 / 503 | erro ou indisponibilidade do Supabase | "nosso sistema está fora agora, um atendente vai te responder" e transferir |
 
 Com o PC da loja desligado, as consultas **não dão erro**: respondem com a última cópia
@@ -301,6 +303,7 @@ Condições cuja parcela ficaria abaixo da mínima já vêm removidas.
 
 | Campo | |
 |---|---|
+| `codigo`, `descricao` | |
 | `preco_referencia` | preço base (o promocional, se houver) |
 | `valor_pedido` | o que o cliente pediu |
 | `pode_aceitar` | `S` / `N` |
@@ -420,7 +423,7 @@ Para enviar no WhatsApp (Cloud API da Meta), use a URL como `link` da mensagem d
 { "type": "image", "image": { "link": "https://mnhtuzsmwacvsymtbyck.supabase.co/storage/v1/object/public/fotos/14818/1-3f9a0c1b2d4e.jpg", "caption": "Guarda-roupa Milano 6 portas – R$ 999,00" } }
 ```
 
-Em 26/10/2026, 1.801 dos 1.913 produtos ativos (94%) tinham foto.
+Em 26/10/2026, 1.801 dos 1.913 produtos ativos (94%) tinham foto, 3.396 fotos no total.
 
 ---
 
@@ -468,7 +471,7 @@ quantas linhas tem) e `erros` (o último erro de cada tabela, se houver).
 Sugestão: monitorar `/status` a cada 5 minutos (UptimeRobot, por exemplo) e alertar no WhatsApp
 da equipe depois de 2 falhas seguidas.
 
-### `GET /q` (token)
+### `GET /q` (Bearer)
 
 Lista todas as consultas disponíveis com descrição, parâmetros, padrões e exemplos. É a fonte de
 verdade: se uma consulta mudar ou entrar uma nova, ela aparece aqui sem precisar atualizar este

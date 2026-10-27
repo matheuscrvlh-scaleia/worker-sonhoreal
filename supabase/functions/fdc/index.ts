@@ -33,7 +33,19 @@ const TABELAS = new Set([
 ]);
 const PAGINA_HASHES = 5000;
 
-const sql = postgres(Deno.env.get("SUPABASE_DB_URL")!, { prepare: false, max: 4, idle_timeout: 30 });
+// Pooler em modo transação (FDC_DB_POOLER = host:porta). Cada instância da função abre a
+// própria conexão; direto no Postgres, a rajada da primeira carga do worker esgotou o limite
+// de conexões do banco. O pooler divide poucas conexões reais entre todas as instâncias.
+function urlDoBanco(): string {
+  const direta = Deno.env.get("SUPABASE_DB_URL")!;
+  const pooler = Deno.env.get("FDC_DB_POOLER");
+  const m = direta.match(/^(postgres(?:ql)?):\/\/[^:]+:([^@]+)@[^/]+\/(.*)$/);
+  if (!pooler || !m) return direta;
+  const ref = new URL(SUPABASE_URL).hostname.split(".")[0];
+  return `${m[1]}://postgres.${ref}:${m[2]}@${pooler}/${m[3]}`;
+}
+
+const sql = postgres(urlDoBanco(), { prepare: false, max: 2, idle_timeout: 10 });
 
 type Papel = "ia" | "admin" | "worker";
 const tokens = (["ia", "admin", "worker"] as Papel[]).map((p) => [p, Deno.env.get(`FDC_TOKEN_${p.toUpperCase()}`) ?? ""] as const);

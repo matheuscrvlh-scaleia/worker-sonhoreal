@@ -89,7 +89,8 @@ o PC desligado, uma promoção que acabou ontem não continua aparecendo.
 export SUPABASE_ACCESS_TOKEN=<SUPABASE_TOKEN do .env>
 npx supabase link --project-ref mnhtuzsmwacvsymtbyck
 npx supabase db push                                # aplica supabase/migrations
-npx supabase secrets set FDC_TOKEN_IA=<gerar> FDC_TOKEN_ADMIN=<gerar> FDC_TOKEN_WORKER=<do instalador>
+npx supabase secrets set FDC_TOKEN_IA=<gerar> FDC_TOKEN_ADMIN=<gerar> FDC_TOKEN_WORKER=<do instalador> \
+  FDC_DB_POOLER=aws-1-sa-east-1.pooler.supabase.com:6543   # pooler em modo transação (Settings → Database)
 npx supabase functions deploy fdc --no-verify-jwt
 ```
 Gerar token: `openssl rand -hex 24`.

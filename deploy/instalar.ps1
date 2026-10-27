@@ -78,7 +78,12 @@ if (Get-Service cloudflared -ErrorAction SilentlyContinue) {
   Write-Host "Removendo o tunel Cloudflare..."
   Stop-Service cloudflared -Force -ErrorAction SilentlyContinue
   $cf = Join-Path $Antigo "cloudflared.exe"
-  if (Test-Path $cf) { & $cf service uninstall 2>$null | Out-Null } else { sc.exe delete cloudflared | Out-Null }
+  if (Test-Path $cf) {
+    # O cloudflared escreve o log no stderr; com "Stop", o PowerShell 5 trata isso como erro e para.
+    $ErrorActionPreference = "Continue"
+    & $cf service uninstall 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+  } else { sc.exe delete cloudflared | Out-Null }
 }
 
 # ---- 4. troca os arquivos (o servico fica parado so durante a copia)

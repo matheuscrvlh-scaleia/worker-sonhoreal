@@ -5,12 +5,12 @@ O worker é um `.exe` só, sem dependências, que só lê o ERP e se atualiza so
 loja desligar, a IA continua respondendo com a última cópia.
 
 ```
-Firebird ◄── worker-fdc (PC da loja) ──HTTPS──► Supabase (Edge Function "fdc" + Postgres + Storage) ◄── IA / n8n
+Firebird ◄── worker-fdc (PC da loja) ──HTTPS──► Supabase (Edge Function "fdc" + Postgres + Storage) ◄── IA (usuário e senha → Bearer)
                  ▲ supervisiona e atualiza
             worker-fdc-agente (serviço Windows "WorkerFDC") ◄── updates.scaleia.ai (R2) ◄── GitHub Actions
 ```
 
-> **Vai integrar a IA/n8n?** Veja [docs/INTEGRACAO.md](docs/INTEGRACAO.md).
+> **Vai integrar a IA?** Veja [docs/INTEGRACAO.md](docs/INTEGRACAO.md).
 > **Como funciona por dentro, segurança e deploy do Supabase:** [docs/ARQUITETURA.md](docs/ARQUITETURA.md).
 
 ## Peças

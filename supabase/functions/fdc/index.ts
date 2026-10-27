@@ -1,5 +1,7 @@
 // Edge Function "fdc": porta de entrada da cópia do ERP no Supabase.
 //
+//   POST /auth/token                   sem token; {usuario, senha} ou {grant_type: "refresh_token",
+//                                      refresh_token} -> {access_token, token_type, expires_in, ...}
 //   GET  /status                       sem token; 200 se o worker deu sinal nos últimos 10 min, 503 se não
 //   GET  /q                            (ia, admin) lista as consultas, para montar as tools da IA
 //   GET  /q/{nome}?a=1  | POST JSON    (ia, admin) executa uma consulta (consultas.ts)
@@ -17,11 +19,16 @@
 //   POST /admin/comandos               (admin) {tipo: "consulta", consulta: "diag_versao", params: {}}
 //                                      ou {tipo: "atualizar"}; o worker executa em até 30 s
 //   GET  /admin/comandos[/{id}]        (admin) resultado
+//   GET  /admin/usuarios               (admin) lista os usuários da API
+//   POST /admin/usuarios               (admin) {usuario, senha, papel: "ia" | "admin"}: cria ou altera
+//   DELETE /admin/usuarios/{usuario}   (admin) remove
 //
-// Tokens nos secrets da função: FDC_TOKEN_IA, FDC_TOKEN_ADMIN, FDC_TOKEN_WORKER. Vão no header
-// Authorization: Bearer <token> (ou X-Token). Publicar com verify_jwt = false (config.toml).
+// IA e equipe: Authorization: Bearer <access_token do /auth/token> (usuários no Supabase Auth,
+// auth.ts). Worker: Bearer <FDC_TOKEN_WORKER> (secret da função). Publicar com verify_jwt = false
+// (config.toml): a função valida os dois tipos de token.
 
 import postgres from "npm:postgres@3.4.5";
+import { emitirToken, ErroAuth, listarUsuarios, removerUsuario, salvarUsuario, verificar } from "./auth.ts";
 import { CONSULTAS } from "./consultas.ts";
 import { converter, ErroParametro } from "./params.ts";
 
@@ -48,7 +55,7 @@ function urlDoBanco(): string {
 const sql = postgres(urlDoBanco(), { prepare: false, max: 2, idle_timeout: 10 });
 
 type Papel = "ia" | "admin" | "worker";
-const tokens = (["ia", "admin", "worker"] as Papel[]).map((p) => [p, Deno.env.get(`FDC_TOKEN_${p.toUpperCase()}`) ?? ""] as const);
+const TOKEN_WORKER = Deno.env.get("FDC_TOKEN_WORKER") ?? "";
 
 Deno.serve(async (req) => {
   const url = new URL(req.url);
@@ -58,6 +65,7 @@ Deno.serve(async (req) => {
     return await rotear(req, url, partes);
   } catch (e) {
     if (e instanceof ErroParametro) return erro(400, e.message);
+    if (e instanceof ErroAuth) return erro(e.status, e.message);
     console.error(e);
     // deno-lint-ignore no-explicit-any
     const codigo = (e as any)?.code;
@@ -70,9 +78,12 @@ Deno.serve(async (req) => {
 
 async function rotear(req: Request, url: URL, p: string[]): Promise<Response> {
   const m = req.method;
-  const papel = papelDe(req);
+  if (m === "POST" && p.length === 2 && p[0] === "auth" && p[1] === "token") {
+    return json(200, await emitirToken(await corpo(req)));
+  }
+  const papel = await papelDe(req);
   if (m === "GET" && p.length === 1 && p[0] === "status") return status(papel);
-  if (!papel) return erro(401, "token inválido ou ausente");
+  if (!papel) return erro(401, "token inválido, expirado ou ausente: peça um novo em POST /auth/token");
 
   switch (p[0]) {
     case "q":
@@ -84,7 +95,7 @@ async function rotear(req: Request, url: URL, p: string[]): Promise<Response> {
       if (papel !== "worker") return erro(403, "rota só do worker");
       return sync(req, url, p.slice(1));
     case "admin":
-      if (papel !== "admin") return erro(403, "rota exige token_admin");
+      if (papel !== "admin") return erro(403, "rota exige usuário admin");
       return admin(req, p.slice(1));
   }
   return erro(404, "rota não existe");
@@ -289,6 +300,15 @@ const autStorage = () => ({ authorization: `Bearer ${SERVICE_KEY}`, apikey: SERV
 // ---------- equipe
 
 async function admin(req: Request, p: string[]): Promise<Response> {
+  if (p[0] === "usuarios") {
+    if (req.method === "GET" && p.length === 1) return json(200, { usuarios: await listarUsuarios() });
+    if (req.method === "POST" && p.length === 1) return json(200, await salvarUsuario(await corpo(req)));
+    if (req.method === "DELETE" && p.length === 2) {
+      await removerUsuario(decodeURIComponent(p[1]));
+      return json(200, { removido: true });
+    }
+    return erro(404, "rota não existe");
+  }
   if (p[0] !== "comandos") return erro(404, "rota não existe");
   if (req.method === "POST" && p.length === 1) {
     const b = await corpo(req);
@@ -315,14 +335,13 @@ async function admin(req: Request, p: string[]): Promise<Response> {
 
 // ---------- apoio
 
-function papelDe(req: Request): Papel | null {
+// Bearer do worker (token fixo) ou de um usuário (JWT do /auth/token).
+async function papelDe(req: Request): Promise<Papel | null> {
   const h = req.headers.get("authorization") ?? "";
   const t = (h.toLowerCase().startsWith("bearer ") ? h.slice(7) : req.headers.get("x-token") ?? "").trim();
   if (!t) return null;
-  for (const [p, esperado] of tokens) {
-    if (esperado.length >= 16 && iguais(t, esperado)) return p;
-  }
-  return null;
+  if (TOKEN_WORKER.length >= 16 && iguais(t, TOKEN_WORKER)) return "worker";
+  return (await verificar(t))?.papel ?? null;
 }
 
 // Comparação em tempo constante, para o tempo de resposta não vazar o token.

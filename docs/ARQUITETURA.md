@@ -17,8 +17,8 @@ PC desligado = a IA continua respondendo com a última cópia, e cada resposta d
 ┌───────────────────────────────────────────┐          ┌──────────────────────────────────────┐
 │ Firebird ◄── worker-fdc.exe               │  HTTPS   │ Edge Function "fdc"                  │
 │   (só lê)    · lê cada extração            ├─────────►│  /sync/*  grava (token do worker)    │
-│              · compara hash por linha     │  só 443  │  /q/*     consulta (token da IA) ◄───┼── IA / n8n
-│              · manda só o que mudou       │  de saída│  /admin/* diagnóstico (token admin)  │
+│              · compara hash por linha     │  só 443  │  /q/*     consulta (Bearer da IA) ◄──┼── IA
+│              · manda só o que mudou       │  de saída│  /auth/token  usuário e senha → JWT  │
 │              ▲                            │          │       │                              │
 │ worker-fdc-agente.exe (serviço WorkerFDC) │          │       ▼                              │
 │   mantém no ar + atualiza sozinho ◄───────┼── R2 ────│ Postgres: schema fdc (não exposto)   │
@@ -35,7 +35,7 @@ PC desligado = a IA continua respondendo com a última cópia, e cada resposta d
 | `internal/replica` | Diferença por hash, lotes, fotos, comandos da equipe, sinal de vida. | Go |
 | `queries.yaml` | **O que é copiado** (`sincronizar`) e os diagnósticos (`consultas`). Atualiza sozinho. | SQL Firebird |
 | `supabase/migrations` | Tabelas `fdc.*`, `fdc.aplicar()` (gravação) e `fdc.q_*()` (perguntas da IA). | SQL Postgres |
-| `supabase/functions/fdc` | Edge Function: tokens, parâmetros, rotas `/q`, `/sync`, `/admin`, upload de fotos. | TypeScript (Deno) |
+| `supabase/functions/fdc` | Edge Function: login (`/auth/token`), parâmetros, rotas `/q`, `/sync`, `/admin`, upload de fotos. | TypeScript (Deno) |
 
 ## Como a cópia funciona
 
@@ -64,7 +64,12 @@ o PC desligado, uma promoção que acabou ontem não continua aparecendo.
   Function. **A service role key do Supabase não vai para a loja.**
 - O schema `fdc` não é exposto na API REST do Supabase: ninguém lê as tabelas com a anon key.
   Só a Edge Function, com conexão direta, enxerga os dados.
-- Os tokens são comparados em tempo constante. O da IA não grava nada, e o do worker não consulta.
+- IA e equipe entram com **usuário e senha** do Supabase Auth (`POST /auth/token`): senha com
+  hash, limite de tentativas e token JWT de 1 h, validado na própria função (chave ES256 do
+  projeto). O papel (`ia` ou `admin`) fica em `app_metadata`, que só o servidor grava. O cadastro
+  aberto está desligado: só um admin cria usuário (`/admin/usuarios`).
+- O worker usa um token fixo, comparado em tempo constante. O usuário da IA não grava nada, e o
+  worker não consulta.
 - Dados pessoais (CPF, telefone, endereço, dívidas) passam a ficar também no Supabase (região
   sa-east-1). Isso é necessário para a IA responder sem o PC. Ninguém além da Edge Function tem
   acesso a eles.
@@ -77,7 +82,7 @@ o PC desligado, uma promoção que acabou ontem não continua aparecendo.
 |---|---|
 | `internal/api` (API HTTP pública, `/q`, `/foto`, `/admin/sql`) | a IA consulta o Supabase |
 | Túnel Cloudflare (`cloudflared`, `sonhoreal-erp.scaleia.ai`) | nada mais entra na loja. `SECRET_TUNNEL` do `.env` pode ser apagado. |
-| `token` / `token_admin` no `config.json` da loja | os tokens agora são secrets da Edge Function |
+| `token` / `token_admin` no `config.json` da loja | IA e equipe entram com usuário e senha; o worker tem o `FDC_TOKEN_WORKER` |
 | `sql_livre` | SQL livre remoto era risco. Diagnóstico agora é por consulta nomeada. |
 | Consultas da IA no `queries.yaml` | viraram funções `fdc.q_*` no Postgres |
 | `powercfg` no instalador | o PC não precisa mais ficar ligado o tempo todo |
@@ -89,11 +94,16 @@ o PC desligado, uma promoção que acabou ontem não continua aparecendo.
 export SUPABASE_ACCESS_TOKEN=<SUPABASE_TOKEN do .env>
 npx supabase link --project-ref mnhtuzsmwacvsymtbyck
 npx supabase db push                                # aplica supabase/migrations
-npx supabase secrets set FDC_TOKEN_IA=<gerar> FDC_TOKEN_ADMIN=<gerar> FDC_TOKEN_WORKER=<do instalador> \
+npx supabase secrets set FDC_TOKEN_WORKER=<gerar> \
   FDC_DB_POOLER=aws-1-sa-east-1.pooler.supabase.com:6543   # pooler em modo transação (Settings → Database)
 npx supabase functions deploy fdc --no-verify-jwt
 ```
 Gerar token: `openssl rand -hex 24`.
+
+No Auth do projeto (painel → Authentication), **desligar o cadastro aberto** e exigir senha de 12
+ou mais caracteres. O primeiro admin é criado com a service role key, pela API admin do Auth:
+e-mail `admin@usuarios.fdc` e `app_metadata: {"papel": "admin"}`. Os demais usuários são criados
+pelo `POST /admin/usuarios`.
 
 **Loja (uma vez):** extrair o zip da release e rodar `instalar.ps1` como Administrador. Na
 primeira vez, ele cria `C:\worker-fdc\config.json`, aproveita o banco de `C:\ponte` e mostra o

@@ -5,7 +5,7 @@ A IA do WhatsApp consulta essa cópia para responder perguntas como "quanto cust
 "parcela em quantas vezes?", "já sou cliente?" e "quanto devo?".
 
 ```
-ERP (Firebird, na loja) ──► worker-fdc (PC da loja) ──HTTPS──► Supabase ◄──HTTPS── IA / n8n
+ERP (Firebird, na loja) ──► worker-fdc (PC da loja) ──HTTPS──► Supabase ◄──HTTPS── IA
                              copia a cada 5–60 min              cópia + API
 ```
 
@@ -21,20 +21,52 @@ ERP (Firebird, na loja) ──► worker-fdc (PC da loja) ──HTTPS──► S
 | | |
 |---|---|
 | **URL base** | `https://mnhtuzsmwacvsymtbyck.supabase.co/functions/v1/fdc` |
-| **Autenticação** | header `Authorization: Bearer <TOKEN>` |
+| **Autenticação** | usuário e senha → `POST /auth/token` → header `Authorization: Bearer <access_token>` |
 | **Formato** | JSON (UTF-8) |
 
-O token vai **sempre no header**, nunca no body nem na URL. `X-Token: <TOKEN>` também é aceito.
-A única rota sem token é `GET /status` (seção 6). As fotos são links públicos do Storage
-(seção 4.5).
+### Pegar o token
 
-Os tokens ficam nos secrets da Edge Function `fdc`, no projeto Supabase `fdc-sonho-real`:
+```bash
+BASE=https://mnhtuzsmwacvsymtbyck.supabase.co/functions/v1/fdc
+curl -X POST "$BASE/auth/token" -H "Content-Type: application/json" \
+  -d '{"usuario": "ia", "senha": "<senha>"}'
+```
+```json
+{
+  "access_token": "eyJhbGciOiJFUzI1NiIs...",
+  "token_type": "bearer",
+  "expires_in": 3600,
+  "expires_at": 1793120000,
+  "refresh_token": "v2x7...",
+  "usuario": "ia",
+  "papel": "ia"
+}
+```
 
-| Secret | Uso |
+- O `access_token` vale **1 hora** (`expires_at` em segundos Unix). Guarde e reaproveite em
+  todas as chamadas, sem fazer login a cada pergunta.
+- **Renovar** antes de vencer, sem a senha:
+  `POST /auth/token` com `{"grant_type": "refresh_token", "refresh_token": "<refresh_token>"}`.
+  Cada renovação devolve um `refresh_token` novo; use sempre o último.
+- Recebeu **401** numa consulta? O token venceu ou foi revogado: peça outro (renovação ou login)
+  e repita a chamada uma vez.
+- Login errado devolve 401. Muitas tentativas seguidas devolvem 429: espere alguns minutos.
+
+O token vai **sempre no header**, nunca no body nem na URL. As rotas sem token são
+`POST /auth/token` e `GET /status` (seção 6). As fotos são links públicos do Storage (seção 4.5).
+
+### Usuários
+
+Os usuários ficam no Supabase Auth do projeto `fdc-sonho-real` (senha guardada com hash). Não
+existe cadastro aberto: só um admin cria usuário (seção 6).
+
+| Papel | Pode |
 |---|---|
-| `FDC_TOKEN_IA` | a IA: todas as consultas da seção 4 |
-| `FDC_TOKEN_ADMIN` | só a equipe: status detalhado e diagnóstico do ERP (seção 6). **Nunca configure na IA.** |
-| `FDC_TOKEN_WORKER` | só o worker da loja (`C:\worker-fdc\config.json`). Não serve para consultas. |
+| `ia` | todas as consultas da seção 4 e o `/status` detalhado |
+| `admin` | o mesmo, mais diagnóstico do ERP e gestão de usuários (seção 6). **Nunca configure na IA.** |
+
+O worker da loja não usa usuário: ele tem um token próprio (`FDC_TOKEN_WORKER`), que só serve
+para enviar dados e não faz consultas.
 
 ---
 
@@ -44,7 +76,6 @@ Toda consulta fica em `/q/{nome}`. Os parâmetros podem ir de dois jeitos, com o
 
 **GET com parâmetros na URL**
 ```bash
-BASE=https://mnhtuzsmwacvsymtbyck.supabase.co/functions/v1/fdc
 curl "$BASE/q/buscar_produto?busca=colchao%20casal" \
   -H "Authorization: Bearer $TOKEN"
 ```
@@ -65,16 +96,13 @@ curl -X POST "$BASE/q/buscar_produto" \
 - Valores podem ir como texto ou número: `{"codigo": 10110}` e `{"codigo": "10110"}` dão no mesmo.
 - O que não for enviado usa o padrão. Parâmetro desconhecido é ignorado.
 
-### n8n
+### Cliente HTTP da IA (o que implementar)
 
-Nó **HTTP Request**:
-- **Method:** `POST`
-- **URL:** `https://mnhtuzsmwacvsymtbyck.supabase.co/functions/v1/fdc/q/{{ $json.consulta }}`, ou fixa por consulta
-- **Authentication:** Generic Credential Type → **Header Auth**
-  - Name: `Authorization`
-  - Value: `Bearer <FDC_TOKEN_IA>`
-- **Send Body:** JSON → os parâmetros da consulta
-- **Settings → Never Error:** ligado, para tratar 4xx/5xx no fluxo (seção 3)
+1. Ao iniciar, `POST /auth/token` com usuário e senha. Guarde `access_token`, `refresh_token`
+   e `expires_at`.
+2. Em cada pergunta, `POST /q/{nome}` com `Authorization: Bearer <access_token>`.
+3. Faltando menos de 5 minutos para `expires_at`, renove com o `refresh_token`.
+4. Se vier 401, faça login de novo e repita a chamada uma única vez.
 
 ---
 
@@ -434,11 +462,11 @@ Em 26/10/2026, 1.801 dos 1.913 produtos ativos (94%) tinham foto.
   funcionando com a cópia; é a equipe que precisa saber.
 - `banco_erp_ok: false` = o worker está no ar, mas não alcança o Firebird.
 
-Com `FDC_TOKEN_IA` ou `FDC_TOKEN_ADMIN`, o `/status` também traz `tabelas` (quando cada tabela foi
-copiada e quantas linhas tem) e `erros` (o último erro de cada tabela, se houver).
+Com Bearer (`ia` ou `admin`), o `/status` também traz `tabelas` (quando cada tabela foi copiada e
+quantas linhas tem) e `erros` (o último erro de cada tabela, se houver).
 
-Sugestão: monitorar `/status` a cada 5 minutos (UptimeRobot, ou um fluxo no n8n) e alertar no
-WhatsApp da equipe depois de 2 falhas seguidas.
+Sugestão: monitorar `/status` a cada 5 minutos (UptimeRobot, por exemplo) e alertar no WhatsApp
+da equipe depois de 2 falhas seguidas.
 
 ### `GET /q` (token)
 
@@ -446,7 +474,22 @@ Lista todas as consultas disponíveis com descrição, parâmetros, padrões e e
 verdade: se uma consulta mudar ou entrar uma nova, ela aparece aqui sem precisar atualizar este
 documento. Dá para gerar as tools da IA automaticamente a partir dela.
 
-### Diagnóstico do ERP (só `FDC_TOKEN_ADMIN`)
+### Usuários (só `admin`)
+
+```bash
+# lista
+curl "$BASE/admin/usuarios" -H "Authorization: Bearer $ADMIN"
+# cria, ou troca senha/papel de quem já existe (senha: mínimo 12 caracteres)
+curl -X POST "$BASE/admin/usuarios" -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"usuario": "ia-homologacao", "senha": "<senha forte>", "papel": "ia"}'
+# remove
+curl -X DELETE "$BASE/admin/usuarios/ia-homologacao" -H "Authorization: Bearer $ADMIN"
+```
+
+`usuario`: 3 a 40 caracteres (letras minúsculas, números, `.`, `-`, `_`). Ao remover um usuário ou
+trocar a senha, o token que ele já tinha continua valendo até vencer (no máximo 1 hora).
+
+### Diagnóstico do ERP (só `admin`)
 
 O Firebird fica na loja e não é acessível de fora. Para rodar um diagnóstico, faça o pedido no
 Supabase. O worker busca os pedidos a cada 30 s, executa no ERP e grava o resultado:

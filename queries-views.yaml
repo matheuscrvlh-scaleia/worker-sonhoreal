@@ -4,7 +4,7 @@
 # Quando a FDC der SELECT nas tabelas (deploy/usuario_leitura.sql), volte para o queries.yaml.
 #
 # O que fica de fora (as tabelas no Supabase ficam paradas no último dado que receberam):
-#   promocao, foto, condicao, condicao_fator, loja, parcela.
+#   promocao, foto, condicao, condicao_fator, loja, parcela, compra.
 #   ATENÇÃO: parcela (títulos em aberto) congela; não usar para cobrança enquanto valer este arquivo.
 # Colunas que as views não têm vão como NULL (fdc.aplicar troca a linha inteira).
 # As regras de Firebird do queries.yaml valem aqui também.
@@ -62,28 +62,8 @@ sincronizar:
       FROM VIEWCLIENTES c
       WHERE c.DOCTOCLIENTE IS NOT NULL
 
-  # Vendas dos últimos 24 meses, montadas a partir dos itens. A VIEWFATURAMENTO já aplica a
-  # regra de venda válida (STATUS 'A', TIPOSAIDA 1/2/9, sem garantia estendida).
-  # total = soma dos itens (não é o VALTOTNOTA da nota). Sem nota fiscal e datas de entrega.
-  compra:
-    chave: [filial, venda]
-    intervalo_minutos: 30
-    sql: |
-      SELECT
-        f.IDFILIAL    AS filial,
-        f.NUMEROSAIDA AS venda,
-        MAX(f.DOCTOCLIENTE)       AS documento,
-        CAST(MAX(f.DATA) AS DATE) AS data,
-        SUM(f.SUBTOTAL)           AS total,
-        LIST(CAST(CAST(f.QTDE AS INTEGER) AS VARCHAR(10)) || 'x '
-             || COALESCE(p.DESCRICAOPRODUTO, 'PRODUTO ' || f.IDPRODUTO)
-             || CASE WHEN f.ENTREGUE IN ('S', 'T') THEN ' (entregue)' ELSE '' END, ' | ') AS itens,
-        SUM(CASE WHEN COALESCE(f.ENTREGUE, 'F') NOT IN ('S', 'T') THEN 1 ELSE 0 END) AS itens_pendentes
-      FROM VIEWFATURAMENTO f
-      LEFT JOIN VIEWPRODUTOS p ON p.IDPRODUTO = f.IDPRODUTO
-      WHERE f.TIPOREGISTRO = 'SAIDA'
-        AND f.DATA >= DATEADD(-24 MONTH TO CURRENT_DATE)
-      GROUP BY f.IDFILIAL, f.NUMEROSAIDA
+  # compra: volta quando soubermos as colunas da VIEWFATURAMENTO deste servidor
+  # (a da cópia de 23/10 tem NUMEROSAIDA; a do servidor não).
 
 consultas:
 
@@ -128,14 +108,3 @@ consultas:
       FROM RDB$PROCEDURE_PARAMETERS pp
       WHERE pp.RDB$PROCEDURE_NAME = UPPER(CAST(:nome AS VARCHAR(63)))
       ORDER BY 1, 2
-
-  # Prova de que o worker lê o banco real: as vendas mais recentes (devem passar de 23/10/2026).
-  diag_ultimas_vendas:
-    descricao: Data e número das 10 vendas mais recentes (VIEWFATURAMENTO).
-    params: []
-    sql: |
-      SELECT FIRST 10 f.IDFILIAL AS filial, f.NUMEROSAIDA AS venda, MAX(f.DATA) AS data
-      FROM VIEWFATURAMENTO f
-      WHERE f.TIPOREGISTRO = 'SAIDA' AND f.DATA >= DATEADD(-30 DAY TO CURRENT_DATE)
-      GROUP BY f.IDFILIAL, f.NUMEROSAIDA
-      ORDER BY 3 DESC

@@ -5,6 +5,8 @@
 //       params.converter gera (palavras gera {nome} e {nome}_termos).
 // tabelas: de onde vêm os dados; a resposta traz em atualizado_em a sincronização mais
 //          antiga entre elas.
+//          promocao (vazia no ERP) e loja (cadastro que quase não muda) ficam de fora: paradas,
+//          faziam preço e estoque em dia parecerem desatualizados (queries-views.yaml não as copia).
 
 import type { Param } from "./params.ts";
 
@@ -47,7 +49,7 @@ const lista: Consulta[] = [
     ],
     funcao: "q_buscar_produto",
     args: [["busca", "text"], ["busca_termos", "text"], ["filial", "text"]],
-    tabelas: ["produto", "estoque", "promocao"],
+    tabelas: ["produto", "estoque"],
   },
   {
     nome: "detalhe_produto",
@@ -60,7 +62,7 @@ const lista: Consulta[] = [
     params: [codigo, filial],
     funcao: "q_detalhe_produto",
     args: [["codigo", "integer"], ["filial", "text"]],
-    tabelas: ["produto", "estoque", "promocao"],
+    tabelas: ["produto", "estoque"],
   },
   {
     nome: "fotos_produto",
@@ -81,7 +83,7 @@ const lista: Consulta[] = [
     params: [codigo],
     funcao: "q_estoque_por_loja",
     args: [["codigo", "integer"]],
-    tabelas: ["estoque", "loja"],
+    tabelas: ["estoque"],
   },
   {
     nome: "promocoes_vigentes",
@@ -92,7 +94,7 @@ const lista: Consulta[] = [
     params: [filial, { nome: "busca", tipo: "palavras", max_palavras: 3, descricao: "opcional, termos para filtrar", exemplo: "" }],
     funcao: "q_promocoes_vigentes",
     args: [["filial", "text"], ["busca_termos", "text"]],
-    tabelas: ["produto", "promocao", "estoque"],
+    tabelas: ["produto", "estoque"],
   },
 
   // ============================================================ PAGAMENTO E NEGOCIAÇÃO
@@ -134,7 +136,7 @@ const lista: Consulta[] = [
     ],
     funcao: "q_negociar_preco",
     args: [["codigo", "integer"], ["valor_pedido", "numeric"], ["filial", "text"], ["desconto_maximo_loja", "numeric"]],
-    tabelas: ["produto", "promocao"],
+    tabelas: ["produto"],
   },
 
   // ============================================================ CLIENTE

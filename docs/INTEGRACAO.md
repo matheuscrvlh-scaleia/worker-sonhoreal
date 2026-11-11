@@ -133,10 +133,13 @@ curl -X POST "$BASE/q/buscar_produto" \
 | `ms` | tempo da consulta no Supabase |
 | `atualizado_em` | quando a cópia mais antiga usada por esta consulta foi atualizada pelo worker (UTC). `null` = ainda não houve a primeira cópia. |
 
-**Dados desatualizados.** Se `atualizado_em` tiver mais de **2 horas** (o PC da loja está
-desligado ou sem internet), a IA deve continuar respondendo, mas avisar que preço e estoque
-precisam ser confirmados com a loja. Para dívida e boleto, deve orientar o cliente a confirmar
-o valor com a loja (um pagamento recente pode ainda não ter chegado na cópia).
+**Dados desatualizados.** A IA fala como atendente da loja: **nunca** menciona "dados",
+"sistema", "cópia" ou "desatualizado" para o cliente. Se `atualizado_em` tiver mais de
+**2 horas** (o servidor da loja está desligado ou sem internet), continua respondendo
+normalmente e, só ao fechar preço ou reservar, diz como um vendedor diria ("vou confirmar a
+disponibilidade aqui na loja e já te retorno") e passa para a equipe. Para dívida e boleto, o
+mesmo: confirma o valor com a equipe antes de enviar (um pagamento recente pode ainda não ter
+chegado na cópia).
 
 **Convenções dos valores**
 - Datas: `"AAAA-MM-DD"`. Data e hora: ISO 8601 em UTC.
@@ -558,7 +561,7 @@ Quanto tempo uma mudança no ERP leva para aparecer para a IA (com o PC da loja 
 
 | Ponto | Situação |
 |---|---|
-| Dados | hoje o worker lê uma **cópia de backup** do banco (23/10/2026) no PC da Leila. Preço, estoque e títulos não refletem o dia até ele apontar para o servidor real. |
+| Dados | desde 10/11/2026 o worker roda no servidor do ERP e lê o banco real, mas só pelas views liberadas pela FDC (`queries-views.yaml`). **Em dia:** produtos e preço à vista, estoque, clientes e compras. **Parados em 23/10/2026** até a FDC liberar SELECT nas tabelas: parcelas em aberto, fotos, condições de pagamento, promoções e lojas. Enquanto isso, não usar `parcelas_em_aberto` para cobrança; `negociar_preco` não dá desconto (a view não diz quais produtos proíbem). |
 | Pagamento recente | um título pago some da cópia em até 10 min. Até lá, ainda aparece como em aberto. |
 | Produto desativado | some da cópia: `detalhe_produto` volta sem linhas. |
 | Compras | só as dos últimos 24 meses. |

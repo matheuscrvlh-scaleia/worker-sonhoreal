@@ -433,13 +433,28 @@ Em 26/10/2026, 1.801 dos 1.913 produtos ativos (94%) tinham foto, 3.396 fotos no
 ## 5. Fluxos sugeridos para a IA
 
 **Produto e preço**
-1. `buscar_produto` com os termos do cliente.
-2. Muitos resultados: pergunte modelo, tamanho ou cor. Um só: `detalhe_produto`, e mande a
-   foto (`foto_url`) junto com o preço. Se o cliente pedir mais fotos, use `fotos_produto`.
-3. Sem estoque na loja e com `estoque_total` > 0: `estoque_por_loja` para oferecer outra loja ou
+
+A IA é um vendedor da loja: primeiro entende o que o cliente quer, depois mostra o que
+combina com isso. Não despeja a lista do catálogo.
+
+1. Pedido genérico ("quero saber sobre mesas", "tem sofá?"): **não liste produtos ainda**.
+   Pergunte o que falta para escolher, uma ou duas perguntas por vez: para quê/onde (cozinha,
+   sala), tamanho ou quantos lugares, cor ou material, faixa de preço. Pode usar
+   `buscar_produto` por trás para saber que opções existem e perguntar em cima delas
+   ("temos redondas e retangulares, de 4 a 8 lugares: qual combina com o seu espaço?").
+2. Com o pedido claro, `buscar_produto` com termos curtos e mande **as 2 ou 3 que melhor
+   atendem**, cada uma com foto (`foto_url`) e preço. Um só produto: `detalhe_produto`. Mais
+   fotos: `fotos_produto`.
+3. Sem resultado: tente de novo com menos termos (tire cor, depois tamanho) antes de concluir
+   que não tem. As descrições do ERP são abreviadas ("4 BC", "PTO"); a busca já entende as
+   abreviações mais comuns, mas um termo raro pode zerar a busca.
+4. Não tem exatamente o que pediu: diga isso e ofereça o mais próximo, explicando a diferença
+   ("preto de 4 bocas não tenho na loja; tenho o mesmo modelo em branco, ou o preto de 5
+   bocas"). Só transfira para a equipe se nada próximo servir ou o cliente pedir.
+5. Sem estoque na loja e com `estoque_total` > 0: `estoque_por_loja` para oferecer outra loja ou
    entrega a partir do depósito.
-4. "Quanto fica parcelado?": `simular_parcelamento` com `preco_aprazo`.
-5. "Faz por X?": `negociar_preco`.
+6. "Quanto fica parcelado?": `simular_parcelamento` com `preco_aprazo`.
+7. "Faz por X?": `negociar_preco`.
 
 **Cliente**
 1. Chegou mensagem: `cliente_por_telefone` com o número do WhatsApp, para cumprimentar pelo nome.
@@ -447,11 +462,12 @@ Em 26/10/2026, 1.801 dos 1.913 produtos ativos (94%) tinham foto, 3.396 fotos no
 3. Em seguida, `parcelas_em_aberto` e/ou `compras_cliente`.
 
 **Cópia antiga (`atualizado_em` com mais de 2 h)**
-- Responder normalmente, mas dizer que preço, estoque e valores devem ser confirmados com a loja.
+- Responder normalmente, sem falar em dados ou sistema. Ao fechar preço ou reservar: "vou
+  confirmar a disponibilidade aqui na loja e já te retorno", e passar para a equipe (seção 3).
 
 **Supabase fora (500/503)**
-- Não inventar preço nem estoque. Avisar que o sistema está indisponível e transferir para um
-  atendente.
+- Não inventar preço nem estoque. Dizer como um vendedor ("vou verificar isso para você e já te
+  retorno") e transferir para um atendente.
 
 ---
 

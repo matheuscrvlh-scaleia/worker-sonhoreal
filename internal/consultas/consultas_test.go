@@ -140,7 +140,9 @@ func TestQueriesDoRepositorio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, nome := range []string{"produto", "estoque", "promocao", "foto", "condicao", "condicao_fator", "loja", "cliente", "parcela", "compra"} {
+	// promocao e condicao_fator saíram de propósito (13/11/2026): tabelas vazias ou não usadas na
+	// Sonho Real e sem GRANT para o FDCRELATORIO. fdc.promocao e fdc.condicao_fator ficam paradas.
+	for _, nome := range []string{"produto", "estoque", "foto", "condicao", "loja", "cliente", "parcela", "compra"} {
 		if cj.Extracoes[nome] == nil {
 			t.Errorf("falta a extração %s (a tabela fdc.%s existe no Supabase)", nome, nome)
 		}

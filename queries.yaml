@@ -94,6 +94,7 @@ sincronizar:
       FROM ESTOQUE e
       JOIN PRODUTO p ON p.IDPRODUTO = e.IDPRODUTO
       WHERE e.QTDER > 0 AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
+        AND e.IDFILIAL NOT IN ('EN', 'EC')  -- controle interno do sistema (FDC, 13/11/2026)
 
   # Promoções por loja que ainda não acabaram. dataini/datafim (com hora) só entram na chave.
   promocao:
@@ -219,29 +220,36 @@ sincronizar:
       FROM CLIENTE c
       LEFT JOIN SITUACAO s ON s.IDSITUACAO = c.IDSITUACAO
 
-  # Títulos em aberto (STATUS '0'). Título pago some do Supabase; por isso o limite de remoção
-  # é maior que o padrão (um dia de muitos pagamentos não deve travar a sincronização).
-  # CONFIRMAR com diag_receber e diag_receber_amostra antes de ligar para clientes reais.
+  # Títulos em aberto. Regra da FDC (13/11/2026): STATUS '0' aberto, '1' quitado, '2' pago em
+  # parte. valor = o que falta: RECEBER.VALOR menos as baixas da RECEBIDO que abatem o título
+  # (TIPO 1 quitação, 2 parcial, 3 desconto); 4 juros e 8 encargos não abatem. Conferir o
+  # formato do TIPO (CHAR(2)) com diag_recebido_tipo. Título pago some do Supabase; por isso o
+  # limite de remoção é maior que o padrão (um dia de muitos pagamentos não deve travar).
   parcela:
     chave: [filial, titulo]
     intervalo_minutos: 10
     max_remocao_perc: 50
     sql: |
-      SELECT
-        r.IDFILIAL       AS filial,
-        r.NUMERORECEBER  AS titulo,
-        r.SEQPARCELA     AS parcela,
-        r.DOCTOCLIENTE   AS documento,
-        r.NUMEROSAIDA    AS venda,
-        CAST(r.DATAEMISSAO AS DATE) AS emissao,
-        CAST(r.VENCIMENTO AS DATE)  AS vencimento,
-        r.VALOR                     AS valor,
-        pt.DESCRICAOPORTADOR  AS forma,
-        r.QRCODEPIXCOPIAECOLA AS pix_copia_e_cola,
-        r.CODIGODEBARRAS      AS codigo_barras
-      FROM RECEBER r
-      LEFT JOIN PORTADOR pt ON pt.IDPORTADOR = r.IDPORTADOR
-      WHERE r.STATUS = '0'
+      SELECT * FROM (
+        SELECT
+          r.IDFILIAL       AS filial,
+          r.NUMERORECEBER  AS titulo,
+          r.SEQPARCELA     AS parcela,
+          r.DOCTOCLIENTE   AS documento,
+          r.NUMEROSAIDA    AS venda,
+          CAST(r.DATAEMISSAO AS DATE) AS emissao,
+          CAST(r.VENCIMENTO AS DATE)  AS vencimento,
+          r.VALOR - COALESCE((SELECT SUM(rb.VALOR) FROM RECEBIDO rb
+                               WHERE rb.IDFILIAL = r.IDFILIAL AND rb.NUMERORECEBER = r.NUMERORECEBER
+                                 AND TRIM(rb.TIPO) IN ('1', '2', '3')), 0) AS valor,
+          pt.DESCRICAOPORTADOR  AS forma,
+          r.QRCODEPIXCOPIAECOLA AS pix_copia_e_cola,
+          r.CODIGODEBARRAS      AS codigo_barras
+        FROM RECEBER r
+        LEFT JOIN PORTADOR pt ON pt.IDPORTADOR = r.IDPORTADOR
+        WHERE r.STATUS IN ('0', '2')
+      ) t
+      WHERE t.valor > 0.009
 
   # Vendas válidas dos últimos 24 meses, com os itens em texto. Itens com
   # IDPRODUTOREFERENCIA são garantia estendida, não produto (VIEWFATURAMENTO).
@@ -420,6 +428,19 @@ consultas:
                r.DOCTOCLIENTE AS documento, c.NOMECLIENTE AS cliente, CAST(r.VENCIMENTO AS DATE) AS vencimento, r.VALOR AS valor
              FROM RECEBER r LEFT JOIN CLIENTE c ON c.DOCTOCLIENTE = r.DOCTOCLIENTE
              WHERE r.STATUS = 'A' AND r.DATAEMISSAO >= CURRENT_DATE - 365 ORDER BY r.DATAEMISSAO DESC) e
+
+  # FDC: TIPO da baixa 1 quitação, 2 parcial, 3 desconto, 4 juros, 8 encargos. Os colchetes
+  # mostram se vem '1' ou '01' (a parcela abate TRIM(TIPO) IN ('1', '2', '3')).
+  diag_recebido_tipo:
+    descricao: >
+      Baixas da RECEBIDO do último ano agrupadas por TIPO, com quantidade e soma.
+    params: []
+    sql: |
+      SELECT '[' || rb.TIPO || ']' AS tipo, COUNT(*) AS qtde, SUM(rb.VALOR) AS soma_valor
+      FROM RECEBIDO rb
+      WHERE rb.DATA >= CURRENT_DATE - 365
+      GROUP BY rb.TIPO
+      ORDER BY 2 DESC
 
   diag_flags:
     descricao: >

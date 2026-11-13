@@ -44,6 +44,7 @@ sincronizar:
       FROM VIEWESTOQUE e
       JOIN VIEWPRODUTOS p ON p.IDPRODUTO = e.IDPRODUTO
       WHERE e.QTDER > 0
+        AND e.IDFILIAL NOT IN ('EN', 'EC')  -- controle interno do sistema (FDC, 13/11/2026)
 
   # Sem endereço completo, última compra, limite, situação e a tabela TELEFONES.
   cliente:

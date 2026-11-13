@@ -51,7 +51,7 @@ sincronizar:
         p.IDPRODUTO         AS codigo,
         p.DESCRICAOPRODUTO  AS descricao,
         CASE WHEN p.FORADELINHA IN ('S', 'T') THEN 'S' ELSE 'N' END AS fora_de_linha,
-        COALESCE(m.NOMEMARCA, fa.NOMEFABRICANTE) AS marca,
+        fa.NOMEFABRICANTE   AS marca,  -- PRODUTOMARCA é vazia e o FDCRELATORIO não lê
         g.NOMEGRUPO         AS grupo,
         sg.NOMESUBGRUPO     AS subgrupo,
         p.REFERENCIAFABRICA AS referencia,
@@ -78,7 +78,6 @@ sincronizar:
              THEN 'S' ELSE 'N' END AS sem_desconto,
         g.PERCDESCONTO      AS desconto_grupo
       FROM PRODUTO p
-      LEFT JOIN PRODUTOMARCA m ON m.IDMARCA = p.IDMARCA
       LEFT JOIN FABRICANTE fa  ON fa.IDFABRICANTE = p.IDFABRICANTE
       LEFT JOIN GRUPO g        ON g.IDGRUPO = p.IDGRUPO
       LEFT JOIN SUBGRUPO sg    ON sg.IDSUBGRUPO = p.IDSUBGRUPO
@@ -96,22 +95,8 @@ sincronizar:
       WHERE e.QTDER > 0 AND COALESCE(p.ATIVO, 'T') IN ('S', 'T')
         AND e.IDFILIAL NOT IN ('EN', 'EC')  -- controle interno do sistema (FDC, 13/11/2026)
 
-  # Promoções por loja que ainda não acabaram. dataini/datafim (com hora) só entram na chave.
-  promocao:
-    chave: [codigo, filial, dataini, datafim]
-    intervalo_minutos: 10
-    sql: |
-      SELECT
-        pp.IDPRODUTO AS codigo,
-        pp.IDFILIAL  AS filial,
-        pp.DATAINI   AS dataini,
-        pp.DATAFIM   AS datafim,
-        CAST(pp.DATAINI AS DATE) AS inicio,
-        CAST(pp.DATAFIM AS DATE) AS fim,
-        pp.PRECOAVISTA AS preco
-      FROM PRODUTOPROMOCAO pp
-      WHERE CAST(pp.DATAFIM AS DATE) >= CURRENT_DATE
-        AND pp.PRECOAVISTA > 0 AND COALESCE(pp.STATUS, '') NOT IN ('C', 'I', 'X')
+  # promocao (PRODUTOPROMOCAO, promoção por loja) saiu: a tabela é vazia e o FDCRELATORIO não
+  # a lê. Se a loja passar a usar, pedir o GRANT e voltar com a extração (está no git).
 
   # Cada linha é uma foto: o worker lê o binário com sql_arquivo, reduz se passar de 1 MB e
   # sobe para o Storage (bucket "fotos"). Tamanho e DA (data de alteração) mudam o hash, e
@@ -157,18 +142,14 @@ sincronizar:
         AND COALESCE(c.RENEGOCIACAO, 'F') NOT IN ('S', 'T')
         AND COALESCE(c.EXCLUSIVA_CLIENTE, 'F') NOT IN ('S', 'T')
 
-  # Fator da condição por loja (quando a loja tem um diferente do padrão).
-  condicao_fator:
-    chave: [codigo, filial]
-    intervalo_minutos: 30
-    sql: |
-      SELECT cf.IDCONDPGVENDA AS codigo, cf.IDFILIAL AS filial, cf.FATOR AS fator
-      FROM CONDPGVENDAFATORFILIAL cf
+  # condicao_fator (CONDPGVENDAFATORFILIAL, fator por loja) saiu: a FDC disse que a Sonho Real
+  # não usa (13/11/2026) e o FDCRELATORIO não a lê.
 
   # ============================================================ LOJA
 
   # Todas as filiais, inclusive depósito (estoque_por_loja mostra o nome). A consulta lojas
-  # do Supabase só mostra as que têm endereço.
+  # do Supabase só mostra as que têm endereço. Lê a VIEWFILIAL (mesmas colunas da FILIAL), que é
+  # o que a FDC liberou.
   loja:
     chave: [filial]
     intervalo_minutos: 60
@@ -185,7 +166,7 @@ sincronizar:
         f.TELEFONES AS telefones,
         f.EMAIL    AS email,
         f.ORDEMEXIBICAO AS ordem
-      FROM FILIAL f
+      FROM VIEWFILIAL f
 
   # ============================================================ CLIENTE
   #
@@ -202,8 +183,7 @@ sincronizar:
         c.CELULAR       AS celular,
         c.TELEFONES     AS telefones,
         c.TELEFONEALTERNATIVO AS telefone_alternativo,
-        (SELECT LIST(TRIM(t.TELEFONE), '|') FROM TELEFONES t
-          WHERE t.DOCTOCLIENTE = c.DOCTOCLIENTE) AS telefones_extra,
+        -- telefones_extra (tabela TELEFONES) vai NULL até a FDC dar o GRANT ao FDCRELATORIO.
         c.ENDERECO      AS endereco,
         c.NUMERO        AS numero,
         c.COMPLEMENTO   AS complemento,
@@ -288,65 +268,6 @@ consultas:
   # Pedir pelo Supabase:  POST /admin/comandos {"tipo": "consulta", "consulta": "diag_versao"}
   # e ler o resultado em  GET /admin/comandos/{id}  (o worker responde em até 30 s).
 
-  # PEDIDOVENDA está vazia na Sonho Real, por isso não é copiada para o Supabase (a IA diria
-  # "você não tem pedidos" a quem comprou). Se passarem a usar, vira uma extração em sincronizar.
-  pedidos_cliente:
-    descricao: >
-      Últimos 10 pedidos de venda do cliente (não cancelados) com itens, status, data de entrega
-      e de montagem.
-    max_linhas: 10
-    params:
-      - nome: documento
-        tipo: documento
-        obrigatorio: true
-        exemplo: "123.456.789-09"
-    sql: |
-      SELECT FIRST 10
-        pv.IDFILIAL          AS filial,
-        pv.NUMEROPEDIDOVENDA AS pedido,
-        CAST(pv.DATAPEDIDOVENDA AS DATE) AS data,
-        pv.TOTAL             AS total,
-        pv.STATUS            AS status,
-        pv.STATUSENTREGA     AS status_entrega,
-        CAST(pv.DATAENTREGA AS DATE) AS data_entrega,
-        pv.ENTREGUEAOCLIENTE AS entregue,
-        pv.MONTAGEM          AS tem_montagem,
-        pv.STATUSMONTAGEM    AS status_montagem,
-        CAST(pv.DATAMONTAGEM AS DATE) AS data_montagem,
-        (SELECT LIST(CAST(CAST(i.QTDE AS INTEGER) AS VARCHAR(10)) || 'x ' || p.DESCRICAOPRODUTO, ' | ')
-           FROM ITEMPEDIDOVENDA i JOIN PRODUTO p ON p.IDPRODUTO = i.IDPRODUTO
-          WHERE i.IDFILIAL = pv.IDFILIAL AND i.NUMEROPEDIDOVENDA = pv.NUMEROPEDIDOVENDA) AS itens
-      FROM PEDIDOVENDA pv
-      WHERE pv.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
-        AND pv.DATACANCELAMENTO IS NULL
-      ORDER BY pv.DATAPEDIDOVENDA DESC
-
-  # ASSISTENCIA também está vazia: fica só como diagnóstico, pelo mesmo motivo.
-  assistencias_cliente:
-    descricao: >
-      Assistências técnicas do cliente com status, previsão e conclusão.
-    max_linhas: 10
-    params:
-      - nome: documento
-        tipo: documento
-        obrigatorio: true
-        exemplo: "123.456.789-09"
-    sql: |
-      SELECT FIRST 10
-        a.IDFILIAL AS filial,
-        a.NUMERO   AS numero,
-        CAST(a.DATA AS DATE)          AS abertura,
-        a.STATUS   AS status,
-        CAST(a.DATAPREVISAO AS DATE)  AS previsao,
-        CAST(a.DATACONCLUSAO AS DATE) AS conclusao,
-        a.OBSASSISTENCIA   AS descricao,
-        a.LOCALASSISTENCIA AS local
-      FROM ASSISTENCIA a
-      WHERE a.DOCTOCLIENTE IN (CAST(:documento AS VARCHAR(20)), CAST(:documento_formatado AS VARCHAR(20)))
-      ORDER BY a.DATA DESC
-
-
-
   diag_versao:
     descricao: Versão do Firebird, charset do banco e hora do servidor.
     params: []
@@ -367,10 +288,7 @@ consultas:
              SUM(r.VALOR) AS soma_valor, SUM(COALESCE(r.VALORPAGO, 0)) AS soma_pago,
              SUM(CASE WHEN r.VALORPAGO IS NULL THEN 1 ELSE 0 END) AS sem_valorpago
         FROM RECEBER r GROUP BY r.STATUS
-      UNION ALL SELECT 'PEDIDOVENDA.STATUS', STATUS, COUNT(*), SUM(TOTAL), CAST(NULL AS DOUBLE PRECISION), CAST(NULL AS INTEGER) FROM PEDIDOVENDA GROUP BY STATUS
       UNION ALL SELECT 'SAIDA.STATUSENTREGA', STATUSENTREGA, COUNT(*), NULL, NULL, NULL FROM SAIDA GROUP BY STATUSENTREGA
-      UNION ALL SELECT 'ASSISTENCIA.STATUS', STATUS, COUNT(*), NULL, NULL, NULL FROM ASSISTENCIA GROUP BY STATUS
-      UNION ALL SELECT 'PRODUTOPROMOCAO.STATUS', STATUS, COUNT(*), NULL, NULL, NULL FROM PRODUTOPROMOCAO GROUP BY STATUS
       UNION ALL SELECT 'PRODUTO.ATIVO', ATIVO, COUNT(*), NULL, NULL, NULL FROM PRODUTO GROUP BY ATIVO
       UNION ALL SELECT 'CLIENTE.ATIVO', ATIVO, COUNT(*), NULL, NULL, NULL FROM CLIENTE GROUP BY ATIVO
       ORDER BY 1, 3 DESC
@@ -456,8 +374,6 @@ consultas:
       UNION ALL SELECT 'GRUPO com PERCDESCONTO > 0', CAST(NULL AS CHAR(1)), COUNT(*) FROM GRUPO WHERE PERCDESCONTO > 0
       UNION ALL SELECT 'CONDPGVENDA.ATIVO', ATIVO, COUNT(*) FROM CONDPGVENDA GROUP BY ATIVO
       UNION ALL SELECT 'SAIDA.ENTREGARADOMICILIO', ENTREGARADOMICILIO, COUNT(*) FROM SAIDA GROUP BY ENTREGARADOMICILIO
-      UNION ALL SELECT 'CONDPGVENDAFATORFILIAL linhas', CAST(NULL AS CHAR(1)), COUNT(*) FROM CONDPGVENDAFATORFILIAL
-      UNION ALL SELECT 'CONDPGVENDAGRUPOFATOR linhas', CAST(NULL AS CHAR(1)), COUNT(*) FROM CONDPGVENDAGRUPOFATOR
       ORDER BY 1, 3 DESC
 
   diag_views:
